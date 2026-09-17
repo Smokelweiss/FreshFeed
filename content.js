@@ -413,8 +413,15 @@
 
   function collectVisibleSubscriptions() {
     const channels = { ids: new Set(), handles: new Set(), names: new Set() };
-    document.querySelectorAll("ytd-channel-renderer").forEach((card) => {
-      card.querySelectorAll("a[href]").forEach((link) => {
+    const channelRoots = document.querySelectorAll(
+      "ytd-channel-renderer, ytd-grid-channel-renderer, ytd-channel-list-sub-menu-renderer"
+    );
+    const links = channelRoots.length
+      ? Array.from(document.querySelectorAll("ytd-channel-renderer a[href], ytd-grid-channel-renderer a[href], ytd-channel-list-sub-menu-renderer a[href]"))
+      : Array.from(document.querySelectorAll("main a[href], #primary a[href]"));
+    links.forEach((link) => {
+      const href = link.getAttribute("href") || "";
+      if (href.startsWith("/@") || href.startsWith("/channel/")) {
         const parsed = parseChannelHref(link.getAttribute("href"));
         if (parsed.id) {
           channels.ids.add(parsed.id);
@@ -422,11 +429,16 @@
         if (parsed.handle) {
           channels.handles.add(parsed.handle);
         }
-      });
-      const nameElement = card.querySelector("ytd-channel-name #text, #channel-title");
-      const name = normName(nameElement && nameElement.textContent);
-      if (name) {
-        channels.names.add(name);
+        const name = normName(link.textContent || link.getAttribute("title") || link.getAttribute("aria-label"));
+        if (name && name.length < 160) {
+          channels.names.add(name);
+        }
+      }
+    });
+    document.querySelectorAll("[data-channel-id]").forEach((element) => {
+      const id = element.getAttribute("data-channel-id");
+      if (/^UC[\w-]+$/i.test(id || "")) {
+        channels.ids.add(id);
       }
     });
     return normalizeChannelState({
@@ -447,14 +459,17 @@
     await browser.storage.local.set({ syncProgress: { count: 0, phase: "scroll", startedAt } });
     let unchanged = 0;
     let previousCount = -1;
-    while (Date.now() - startedAt < 60000 && unchanged < 3) {
+    let sawSubscriptionContent = false;
+    while (Date.now() - startedAt < 90000 && (unchanged < 5 || !sawSubscriptionContent)) {
       const bottom = document.documentElement.scrollHeight;
       window.scrollTo(0, bottom);
       if (document.scrollingElement) {
         document.scrollingElement.scrollTop = bottom;
       }
-      await new Promise((resolve) => setTimeout(resolve, 400));
-      const count = document.querySelectorAll("ytd-channel-renderer").length;
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      const visible = collectVisibleSubscriptions();
+      const count = channelCount(visible);
+      sawSubscriptionContent = sawSubscriptionContent || count > 0;
       unchanged = count === previousCount ? unchanged + 1 : 0;
       previousCount = count;
       report(count, previousCount);
@@ -470,7 +485,9 @@
     state.syncFallback = false;
     state.syncLock = null;
     state.syncProgress = null;
-    const result = total > 0 ? "Синхронизировано: " + total + " каналов (" + Math.floor((Date.now() - startedAt) / 1000) + " с)" : "FreshFeed: подписки не найдены";
+    const result = total > 0
+      ? "Синхронизировано: " + total + " каналов (" + Math.floor((Date.now() - startedAt) / 1000) + " с)"
+      : "FreshFeed: не удалось найти подписки. Проверьте, что вы вошли в YouTube.";
     await browser.storage.local.set({
       channels: values,
       syncedAt: state.syncedAt,
