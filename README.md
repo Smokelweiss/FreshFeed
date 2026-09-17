@@ -4,56 +4,43 @@
 
 # FreshFeed
 
-## Слои синхронизации
+FreshFeed hides videos and Shorts from channels you subscribe to on the YouTube home page.
 
-FreshFeed использует три слоя:
+## Synchronization
 
-1. Обновление списка по состоянию кнопок подписки на страницах YouTube.
-2. Ручная синхронизация прокруткой `/feed/channels` по кнопке в popup.
+FreshFeed keeps the list current in three ways:
 
-Автоматическая синхронизация отключена. После нажатия кнопки «Подписаться» или «Отписаться» на странице YouTube канал сразу добавляется в список или удаляется из него. Для загрузки уже существующих подписок доступен ручной запуск из popup.
+1. On the first YouTube page opened after installation, it automatically imports the existing subscriptions.
+2. Clicking YouTube's Subscribe or Unsubscribe button immediately adds or removes that channel.
+3. The **Sync subscriptions** button can manually re-import the complete subscription list.
 
-FreshFeed скрывает на главной странице YouTube (`/`) карточки видео и Shorts от каналов, на которые вы подписаны.
+The primary import reads YouTube's subscription data and continuation pages directly, so it does not need to scroll through hundreds of rendered cards. A page-based fallback remains available if YouTube changes its internal data format.
 
-© 2026 Smokelweiss, AGPL-3.0
+## Features
 
-## Возможности
+- Hide subscribed channels' videos and Shorts on YouTube Home.
+- Automatic first synchronization when YouTube is opened after installation.
+- Immediate updates after Subscribe and Unsubscribe actions.
+- Manual synchronization with progress reporting.
+- No telemetry and no third-party servers.
 
-- Скрытие видео и Shorts подписанных каналов на главной YouTube.
-- Мгновенное обновление списка после нажатия кнопок «Подписаться» и «Отписаться».
-- Ручная синхронизация из popup с открытием страницы подписок и прокруткой списка.
-- Прогресс синхронизации в popup и небольшом уведомлении на странице.
-- Запасной режим с прокруткой страницы подписок, если фоновый запрос не сработал.
-- Обновление списка при просмотре видео: FreshFeed учитывает подписку и отписку от канала.
+## Requirements
 
-## Как работает синхронизация
+- Firefox 140 or newer.
+- The user must be signed in to YouTube.
 
-При ручной синхронизации FreshFeed открывает `/feed/channels` и собирает каналы прокруткой. Это не использует внутренний API YouTube и не выполняет ежедневных фоновых проверок.
+## Temporary installation
 
-Список заменяется результатом успешной синхронизации, поэтому отписавшиеся каналы удаляются автоматически. Синхронизация запускается в фоне на любой открытой вкладке YouTube; одновременно работает только одна вкладка.
+1. Open `about:debugging#/runtime/this-firefox`.
+2. Click **Load Temporary Add-on**.
+3. Select `manifest.json` or the signed `.xpi` package.
 
-## Ограничения
+Temporary add-ons are removed when Firefox restarts.
 
-- Shorts без видимой информации о канале могут быть не обнаружены.
-- YouTube может изменить разметку и формат внутренних данных.
-- Нужна активная авторизация в YouTube; при выходе из аккаунта синхронизация не выполнится.
-- Ручная синхронизация зависит от текущей разметки страницы подписок YouTube.
+## Privacy
 
-## Установка во Firefox
+FreshFeed stores channel data only in Firefox `storage.local`. Network requests are made only to YouTube, which the user is already visiting.
 
-1. Откройте `about:debugging#/runtime/this-firefox`.
-2. Нажмите **«Загрузить временное дополнение»**.
-3. Выберите файл `manifest.json`.
-4. Откройте popup FreshFeed и при необходимости нажмите **«Синхронизировать подписки»**.
+## License
 
-Временные дополнения удаляются после перезапуска Firefox.
-
-Для упаковки создайте ZIP-архив так, чтобы `manifest.json` находился в корне архива. В Developer Edition или Nightly можно включить `xpinstall.signatures.required=false` в `about:config` и загрузить архив через страницу отладки.
-
-## Конфиденциальность
-
-FreshFeed не отправляет данные на внешние серверы и не использует телеметрию. Единственные сетевые запросы выполняются к YouTube, который пользователь уже посещает, для получения списка подписок. Данные каналов хранятся только в `storage.local` Firefox.
-
-## Лицензия
-
-AGPL-3.0. Полный текст лицензии находится в файле `LICENSE`.
+AGPL-3.0. The complete license text is in `LICENSE`.

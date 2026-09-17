@@ -45,11 +45,11 @@
       data = { ...data, syncPending: false };
     }
     enabled.checked = data.enabled !== false;
-    count.textContent = "Каналов: " + channelCount(channels);
-    synced.textContent = "Последняя ручная синхронизация: " + (data.syncedAt ? new Date(data.syncedAt).toLocaleString("ru-RU") : "ещё не было");
+    count.textContent = "Channels: " + channelCount(channels);
+    synced.textContent = "Last sync: " + (data.syncedAt ? new Date(data.syncedAt).toLocaleString("en-US") : "never");
     progressWrap.hidden = !progress;
     if (progress) {
-      progressText.textContent = "Синхронизация… найдено " + (progress.count || 0);
+      progressText.textContent = "Syncing… found " + (progress.count || 0);
     }
     sync.disabled = Boolean(progress || data.syncPending);
     if (data.lastSyncResult) {
@@ -79,10 +79,11 @@
     }
   });
   clear.addEventListener("click", async () => {
-    if (window.confirm("Очистить весь список подписок?")) {
+    if (window.confirm("Clear the entire subscription list?")) {
       await browser.storage.local.set({
         channels: { ids: [], handles: [], names: [] },
-        syncedAt: null
+        syncedAt: null,
+        initialSyncDone: false
       });
       await refresh();
     }

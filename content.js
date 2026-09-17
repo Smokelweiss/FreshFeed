@@ -122,7 +122,7 @@
       try {
         walkEmbeddedData(card.wrappedJSObject && card.wrappedJSObject.data, 0, new Set(), result);
       } catch (error) {
-        // Доступ к данным обёртки может быть запрещён Firefox.
+        // Firefox may restrict access to the wrapped page data.
       }
     }
     return result;
@@ -336,7 +336,7 @@
 
   function progressText(count, startedAt, prefix) {
     const seconds = Math.floor((Date.now() - startedAt) / 1000);
-    return prefix + " найдено " + count + " каналов (" + seconds + " с)";
+    return prefix + " found " + count + " channels (" + seconds + "s)";
   }
 
   function createProgressWriter(phase, startedAt) {
@@ -390,24 +390,245 @@
   }
 
   function overlayProgress(count, startedAt, phase) {
-    const prefix = phase === "scroll" ? "FreshFeed: синхронизация подписок…" : "FreshFeed: синхронизация подписок…";
+    const prefix = phase === "scroll" ? "FreshFeed: syncing subscriptions…" : "FreshFeed: syncing subscriptions…";
     showOverlay(progressText(count, startedAt, prefix), true);
   }
 
-  async function runPrimarySync(userInitiated) {
-    if (!userInitiated) {
+  function extractJsonObject(source, marker) {
+    const markerIndex = source.indexOf(marker);
+    if (markerIndex < 0) {
+      return null;
+    }
+    const start = source.indexOf("{", markerIndex + marker.length);
+    if (start < 0) {
+      return null;
+    }
+    let depth = 0;
+    let quoted = false;
+    let escaped = false;
+    for (let index = start; index < source.length; index += 1) {
+      const character = source[index];
+      if (quoted) {
+        if (escaped) {
+          escaped = false;
+        } else if (character === "\\") {
+          escaped = true;
+        } else if (character === "\"") {
+          quoted = false;
+        }
+        continue;
+      }
+      if (character === "\"") {
+        quoted = true;
+      } else if (character === "{") {
+        depth += 1;
+      } else if (character === "}" && --depth === 0) {
+        try {
+          return JSON.parse(source.slice(start, index + 1));
+        } catch (error) {
+          return null;
+        }
+      }
+    }
+    return null;
+  }
+
+  function htmlValue(html, key) {
+    const match = html.match(new RegExp("\"" + key + "\"\\s*:\\s*\"([^\"]+)\""));
+    return match ? match[1].replace(/\\u0026/g, "&") : "";
+  }
+
+  function channelTitle(value) {
+    if (!value || typeof value !== "object") {
+      return "";
+    }
+    if (typeof value.simpleText === "string") {
+      return normName(value.simpleText);
+    }
+    if (Array.isArray(value.runs)) {
+      return normName(value.runs.map((run) => run && run.text || "").join(""));
+    }
+    return "";
+  }
+
+  function collectSubscriptionData(node, result, depth) {
+    if (!node || typeof node !== "object" || depth > 50) {
       return;
     }
-    await browser.storage.local.set({
-      syncFallback: true,
-      syncLock: null,
-      syncProgress: null,
-      lastSyncResult: "Открываю страницу подписок для ручной синхронизации…"
+    if (typeof node.channelId === "string" && /^UC[\w-]+$/i.test(node.channelId)) {
+      const name = channelTitle(node.title);
+      const canonical = node.navigationEndpoint &&
+        node.navigationEndpoint.browseEndpoint &&
+        node.navigationEndpoint.browseEndpoint.canonicalBaseUrl;
+      const handle = typeof canonical === "string" && canonical.startsWith("/@")
+        ? canonical.split("/")[1].toLowerCase()
+        : "";
+      if (!result.channels.has(node.channelId)) {
+        result.channels.set(node.channelId, { id: node.channelId, name, handle });
+      } else if (handle && !result.channels.get(node.channelId).handle) {
+        result.channels.get(node.channelId).handle = handle;
+      }
+    }
+    if (node.continuationCommand && typeof node.continuationCommand.token === "string") {
+      result.tokens.add(node.continuationCommand.token);
+    }
+    Object.values(node).forEach((value) => collectSubscriptionData(value, result, depth + 1));
+  }
+
+  async function fetchWithTimeout(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function authorizationHeader() {
+    const item = document.cookie.split("; ").find((entry) => entry.startsWith("SAPISID=") || entry.startsWith("__Secure-3PAPISID="));
+    if (!item) {
+      return "";
+    }
+    const separator = item.indexOf("=");
+    const value = decodeURIComponent(item.slice(separator + 1));
+    const timestamp = Math.floor(Date.now() / 1000);
+    const digest = await crypto.subtle.digest(
+      "SHA-1",
+      new TextEncoder().encode(timestamp + " " + value + " https://www.youtube.com")
+    );
+    const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    return "SAPISIDHASH " + timestamp + "_" + hash;
+  }
+
+  async function fetchSubscriptions(onProgress) {
+    const response = await fetchWithTimeout("https://www.youtube.com/feed/channels", { credentials: "include" }, 10000);
+    if (!response.ok) {
+      throw new Error(response.status === 401 || response.status === 403 ? "authentication required" : "subscription page unavailable");
+    }
+    const html = await response.text();
+    const initialData = extractJsonObject(html, "ytInitialData");
+    if (!initialData) {
+      throw new Error("subscription data unavailable");
+    }
+    const result = { channels: new Map(), tokens: new Set() };
+    collectSubscriptionData(initialData, result, 0);
+    const apiKey = htmlValue(html, "INNERTUBE_API_KEY");
+    const clientVersion = htmlValue(html, "INNERTUBE_CLIENT_VERSION");
+    if (!apiKey || !clientVersion) {
+      throw new Error("YouTube API configuration unavailable");
+    }
+    const authorization = await authorizationHeader();
+    const headers = {
+      "Content-Type": "application/json",
+      "X-Origin": "https://www.youtube.com",
+      "X-Youtube-Client-Name": "1",
+      "X-Youtube-Client-Version": clientVersion
+    };
+    if (authorization) {
+      headers.Authorization = authorization;
+    }
+    let round = 0;
+    onProgress({ count: result.channels.size, round });
+    while (result.tokens.size && round < 200) {
+      const token = result.tokens.values().next().value;
+      result.tokens.delete(token);
+      const continuationResponse = await fetchWithTimeout(
+        "https://www.youtube.com/youtubei/v1/browse?key=" + encodeURIComponent(apiKey) + "&prettyPrint=false",
+        {
+          method: "POST",
+          credentials: "include",
+          headers,
+          body: JSON.stringify({
+            context: { client: { clientName: "WEB", clientVersion } },
+            continuation: token
+          })
+        },
+        10000
+      );
+      if (!continuationResponse.ok) {
+        throw new Error(continuationResponse.status === 401 || continuationResponse.status === 403 ? "authentication required" : "subscription request failed");
+      }
+      const page = { channels: new Map(), tokens: new Set() };
+      collectSubscriptionData(await continuationResponse.json(), page, 0);
+      page.channels.forEach((channel, id) => {
+        if (!result.channels.has(id) || (!result.channels.get(id).handle && channel.handle)) {
+          result.channels.set(id, channel);
+        }
+      });
+      page.tokens.forEach((pageToken) => result.tokens.add(pageToken));
+      round += 1;
+      onProgress({ count: result.channels.size, round });
+    }
+    const channels = { ids: [], handles: [], names: [] };
+    result.channels.forEach((channel) => {
+      channels.ids.push(channel.id);
+      if (channel.handle) {
+        channels.handles.push(channel.handle);
+      }
+      if (channel.name) {
+        channels.names.push(channel.name);
+      }
     });
-    if (location.pathname !== "/feed/channels") {
-      location.href = "/feed/channels";
-    } else {
-      startFallbackSync();
+    if (!channels.ids.length) {
+      throw new Error("no subscriptions found");
+    }
+    return normalizeChannelState(channels);
+  }
+
+  async function runPrimarySync(userInitiated) {
+    if (syncRunning) {
+      return;
+    }
+    syncRunning = true;
+    const startedAt = Date.now();
+    const report = createProgressWriter("fetch", startedAt);
+    await browser.storage.local.set({ syncProgress: { count: 0, phase: "fetch", startedAt } });
+    try {
+      const channels = await fetchSubscriptions(({ count, round }) => {
+        report(count, round);
+        if (userInitiated) {
+          overlayProgress(count, startedAt, "fetch");
+        }
+      });
+      await report.finish();
+      const total = channelCount(channels);
+      const syncedAt = Date.now();
+      state.channels = channels;
+      state.syncedAt = syncedAt;
+      state.syncPending = false;
+      state.syncFallback = false;
+      state.syncProgress = null;
+      updateSets();
+      const result = "Synchronized " + total + " channels (" + Math.floor((syncedAt - startedAt) / 1000) + "s)";
+      await browser.storage.local.set({
+        channels,
+        syncedAt,
+        initialSyncDone: true,
+        syncPending: false,
+        syncFallback: false,
+        syncProgress: null,
+        lastSyncResult: result
+      });
+      showOverlay("FreshFeed: ready, " + total + " channels", false);
+      removeOverlayLater();
+    } catch (error) {
+      await report.finish();
+      const message = (error && error.message) || "unknown error";
+      await browser.storage.local.set({
+        syncPending: false,
+        syncProgress: null,
+        syncFallback: true,
+        lastSyncResult: "Sync failed: " + message + ". Trying page fallback…"
+      });
+      showOverlay("FreshFeed: trying page fallback…", true);
+      if (location.pathname !== "/feed/channels") {
+        location.href = "/feed/channels";
+      } else {
+        startFallbackSync();
+      }
+    } finally {
+      syncRunning = false;
     }
   }
 
@@ -460,13 +681,13 @@
     let unchanged = 0;
     let previousCount = -1;
     let sawSubscriptionContent = false;
-    while (Date.now() - startedAt < 90000 && (unchanged < 5 || !sawSubscriptionContent)) {
+    while (Date.now() - startedAt < 30000 && (unchanged < 3 || !sawSubscriptionContent)) {
       const bottom = document.documentElement.scrollHeight;
       window.scrollTo(0, bottom);
       if (document.scrollingElement) {
         document.scrollingElement.scrollTop = bottom;
       }
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      await new Promise((resolve) => setTimeout(resolve, 250));
       const visible = collectVisibleSubscriptions();
       const count = channelCount(visible);
       sawSubscriptionContent = sawSubscriptionContent || count > 0;
@@ -486,8 +707,8 @@
     state.syncLock = null;
     state.syncProgress = null;
     const result = total > 0
-      ? "Синхронизировано: " + total + " каналов (" + Math.floor((Date.now() - startedAt) / 1000) + " с)"
-      : "FreshFeed: не удалось найти подписки. Проверьте, что вы вошли в YouTube.";
+      ? "Synchronized " + total + " channels (" + Math.floor((Date.now() - startedAt) / 1000) + "s)"
+      : "FreshFeed: no subscriptions found. Make sure you are signed in to YouTube.";
     await browser.storage.local.set({
       channels: values,
       syncedAt: state.syncedAt,
@@ -498,7 +719,7 @@
       lastSyncResult: result
     });
     updateSets();
-    showOverlay(total > 0 ? "FreshFeed: готово, " + total + " каналов" : result, false);
+    showOverlay(total > 0 ? "FreshFeed: ready, " + total + " channels" : result, false);
     removeOverlayLater();
     fallbackRunning = false;
   }
@@ -551,12 +772,23 @@
   }
 
   async function maybeStartSync() {
-    if (syncRunning || fallbackRunning || state.syncFallback || !state.syncPending) {
+    if (syncRunning || fallbackRunning || !state.syncPending) {
       return;
     }
-    syncRunning = true;
+    const candidate = { at: Date.now() };
+    const current = state.syncLock;
+    if (current && Date.now() - current.at < 30000) {
+      return;
+    }
+    await browser.storage.local.set({ syncLock: candidate });
+    const saved = await browser.storage.local.get("syncLock");
+    if (!saved.syncLock || saved.syncLock.at !== candidate.at) {
+      return;
+    }
+    state.syncLock = candidate;
     await runPrimarySync(true);
-    syncRunning = false;
+    await browser.storage.local.set({ syncLock: null });
+    state.syncLock = null;
   }
 
   function applyStorage(changes) {
@@ -610,7 +842,8 @@
       "syncLock",
       "syncProgress",
       "syncFallback",
-      "lastSyncResult"
+      "lastSyncResult",
+      "initialSyncDone"
     ]);
     state.enabled = saved.enabled !== false;
     state.channels = normalizeChannelState(saved.channels);
@@ -619,8 +852,9 @@
     state.syncLock = saved.syncLock || null;
     state.syncProgress = saved.syncProgress || null;
     state.syncFallback = Boolean(saved.syncFallback);
-    if (saved.lastSyncResult === "Ошибка синхронизации: fetch") {
-      await browser.storage.local.set({ lastSyncResult: null });
+    if (saved.initialSyncDone !== true && !saved.syncPending && !saved.syncFallback) {
+      await browser.storage.local.set({ syncPending: true, syncPendingAt: Date.now() });
+      state.syncPending = true;
     }
     updateSets();
     browser.storage.onChanged.addListener(applyStorage);
