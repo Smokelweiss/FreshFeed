@@ -449,17 +449,43 @@
     }
   }
 
-  function parseInitialData(html) {
-    const match = html.match(/var ytInitialData\s*=\s*(\{.*?\});<\/script>/s) ||
-      html.match(/ytInitialData"\]\s*=\s*(\{.*?\});/s);
-    if (!match) {
-      throw new Error("not-logged-in");
+  function logSyncFailure(label, error) {
+    const message = (error && error.message) || String(error || "unknown");
+    console.warn("[FreshFeed] " + label + ":", message);
+    if (browser && browser.storage && browser.storage.local) {
+      browser.storage.local.set({ lastSyncResult: "Ошибка синхронизации: " + message }).catch(() => {});
     }
+  }
+
+  async function fetchWithTimeout(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs || 15000);
     try {
-      return JSON.parse(match[1]);
-    } catch (error) {
-      throw new Error("not-logged-in");
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
     }
+  }
+
+  function parseInitialData(html) {
+    const candidates = [
+      /var ytInitialData\s*=\s*(\{.*?\});\s*<\/script>/s,
+      /ytInitialData"\]\s*=\s*(\{.*?\});\s*<\/script>/s,
+      /\["ytInitialData"\]\s*=\s*(\{.*?\});\s*<\/script>/s,
+      /ytInitialData\s*=\s*(\{.*?\});\s*<\/script>/s,
+      /var ytInitialData\s*=\s*(\{.*?\});/s
+    ];
+    for (const pattern of candidates) {
+      const match = html.match(pattern);
+      if (match) {
+        try {
+          return JSON.parse(match[1]);
+        } catch (error) {
+          throw new Error("not-logged-in");
+        }
+      }
+    }
+    throw new Error("not-logged-in");
   }
 
   function htmlValue(html, key) {
@@ -468,12 +494,20 @@
   }
 
   async function fetchSubscriptions(onProgress) {
-    const response = await fetch("https://www.youtube.com/feed/channels", { credentials: "include" });
+    const response = await fetchWithTimeout("https://www.youtube.com/feed/channels", { credentials: "include" }, 20000);
     if (!response.ok) {
       throw new Error(response.status === 401 || response.status === 403 ? "auth" : "fetch");
     }
     const html = await response.text();
-    const data = parseInitialData(html);
+    let data;
+    try {
+      data = parseInitialData(html);
+    } catch (error) {
+      if (error && error.message === "not-logged-in") {
+        throw new Error("not-logged-in");
+      }
+      throw error;
+    }
     const out = { channels: new Map(), tokens: [] };
     collect(data, out);
     if (!html.includes("channelRenderer") && !out.tokens.length) {
@@ -505,7 +539,7 @@
       if (authorization) {
         headers.Authorization = authorization;
       }
-      const continuationResponse = await fetch("https://www.youtube.com/youtubei/v1/browse?key=" + encodeURIComponent(apiKey) + "&prettyPrint=false", {
+      const continuationResponse = await fetchWithTimeout("https://www.youtube.com/youtubei/v1/browse?key=" + encodeURIComponent(apiKey) + "&prettyPrint=false", {
         method: "POST",
         credentials: "include",
         headers,
@@ -513,7 +547,7 @@
           context: { client: { clientName: "WEB", clientVersion, hl, gl } },
           continuation: token
         })
-      });
+      }, 20000);
       if (continuationResponse.status === 401 || continuationResponse.status === 403) {
         throw new Error("auth");
       }
@@ -592,12 +626,17 @@
       }
     } catch (error) {
       await report.finish();
+      const message = (error && error.message) || String(error || "unknown");
+      logSyncFailure("primary sync", error);
+      await browser.storage.local.set({
+        syncLock: null,
+        syncProgress: null,
+        syncFallback: userInitiated,
+        lastSyncResult: "Ошибка синхронизации: " + message
+      });
       if (userInitiated) {
         showOverlay("FreshFeed: не удалось получить подписки автоматически — открываю страницу подписок…", true);
-        await browser.storage.local.set({ syncFallback: true, syncLock: null });
         location.href = "/feed/channels";
-      } else {
-        await browser.storage.local.set({ syncLock: null, syncProgress: null });
       }
     }
   }
@@ -675,6 +714,53 @@
     showOverlay(total > 0 ? "FreshFeed: готово, " + total + " каналов" : result, false);
     removeOverlayLater();
     fallbackRunning = false;
+  }
+
+  function readChannelFromRoot(root) {
+    if (!root) {
+      return { ids: new Set(), handles: new Set(), names: new Set() };
+    }
+    const result = { ids: new Set(), handles: new Set(), names: new Set() };
+    const href = root.getAttribute("data-channel-id") || root.getAttribute("data-channel-handle") || root.querySelector("a[href]") && root.querySelector("a[href]").getAttribute("href") || "";
+    const parsed = parseChannelHref(href);
+    if (parsed.id) {
+      result.ids.add(parsed.id);
+    }
+    if (parsed.handle) {
+      result.handles.add(parsed.handle);
+    }
+    const name = normName(root.querySelector("#text, yt-formatted-string, ytd-channel-name") && (root.querySelector("#text, yt-formatted-string, ytd-channel-name").textContent || root.querySelector("#text, yt-formatted-string, ytd-channel-name").getAttribute("title")));
+    if (name) {
+      result.names.add(name);
+    }
+    return result;
+  }
+
+  async function syncFromSubscribeButton(button) {
+    if (!button) {
+      return;
+    }
+    let channel = ownerChannel();
+    const root = button.closest("ytd-channel-renderer, yt-channel-header-renderer, ytd-video-owner-renderer");
+    if (root) {
+      channel = readChannelFromRoot(root);
+    }
+    if (!hasChannelData(channel)) {
+      const subscribeRoot = button.closest("ytd-subscribe-button-renderer, yt-subscribe-button-view-model");
+      if (subscribeRoot) {
+        channel = readChannelFromRoot(subscribeRoot);
+      }
+    }
+    if (!hasChannelData(channel)) {
+      return;
+    }
+    const buttonState = button.getAttribute("aria-pressed") === "true" || button.getAttribute("subscribed") === "true" || (button.closest("ytd-subscribe-button-renderer") && button.closest("ytd-subscribe-button-renderer").hasAttribute("subscribed"));
+    const result = mergeChannel(channel, !buttonState);
+    if (result.changed) {
+      state.channels = result.channels;
+      updateSets();
+      await browser.storage.local.set({ channels: state.channels });
+    }
   }
 
   function lockIsActive(lock) {
@@ -770,7 +856,8 @@
       "syncLock",
       "syncProgress",
       "syncFallback",
-      "lastAutoSyncAttempt"
+      "lastAutoSyncAttempt",
+      "lastSyncResult"
     ]);
     state.enabled = saved.enabled !== false;
     state.channels = normalizeChannelState(saved.channels);
@@ -784,6 +871,17 @@
     browser.storage.onChanged.addListener(applyStorage);
     window.addEventListener("yt-navigate-finish", updatePageMode);
     window.addEventListener("popstate", () => setTimeout(updatePageMode, 0));
+    document.addEventListener("click", (event) => {
+      const button = event.target && event.target.closest && event.target.closest("button");
+      if (!button) {
+        return;
+      }
+      const subscribeTarget = button.closest("ytd-subscribe-button-renderer, yt-subscribe-button-view-model") || button.closest("ytd-channel-renderer") || button.closest("yt-channel-header-renderer");
+      if (!subscribeTarget) {
+        return;
+      }
+      setTimeout(() => syncFromSubscribeButton(button), 120);
+    }, true);
     updatePageMode();
     if (state.syncFallback && location.pathname === "/feed/channels") {
       startFallbackSync();
