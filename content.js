@@ -11,8 +11,7 @@
     syncPending: false,
     syncLock: null,
     syncProgress: null,
-    syncFallback: false,
-    lastAutoSyncAttempt: null
+    syncFallback: false
   };
   let ids = new Set();
   let handles = new Set();
@@ -384,201 +383,6 @@
     return Math.max(channels.ids.length, channels.handles.length, channels.names.length);
   }
 
-  function cookieValue(name) {
-    const item = document.cookie.split("; ").find((entry) => entry.startsWith(name + "="));
-    return item ? decodeURIComponent(item.slice(name.length + 1)) : "";
-  }
-
-  async function authorizationHeader() {
-    const sapisid = cookieValue("SAPISID") || cookieValue("__Secure-3PAPISID");
-    if (!sapisid) {
-      return "";
-    }
-    const timestamp = Math.floor(Date.now() / 1000);
-    const input = timestamp + " " + sapisid + " https://www.youtube.com";
-    const digest = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(input));
-    const hash = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
-    return "SAPISIDHASH " + timestamp + "_" + hash;
-  }
-
-  function channelTitle(value) {
-    if (!value || typeof value !== "object") {
-      return "";
-    }
-    if (typeof value.simpleText === "string") {
-      return normName(value.simpleText);
-    }
-    if (Array.isArray(value.runs)) {
-      return normName(value.runs.map((run) => run && run.text || "").join(""));
-    }
-    return "";
-  }
-
-  function collect(node, out) {
-    const stack = [{ value: node, depth: 0 }];
-    while (stack.length) {
-      const current = stack.pop();
-      const value = current.value;
-      if (!value || typeof value !== "object" || current.depth > 40) {
-        continue;
-      }
-      if (typeof value.channelId === "string" && value.channelId.startsWith("UC")) {
-        const name = channelTitle(value.title);
-        if (name) {
-          let handle = "";
-          const canonical = value.navigationEndpoint &&
-            value.navigationEndpoint.browseEndpoint &&
-            value.navigationEndpoint.browseEndpoint.canonicalBaseUrl;
-          if (typeof canonical === "string" && canonical.startsWith("/@")) {
-            handle = canonical.split("/")[1].toLowerCase();
-          }
-          if (!out.channels.has(value.channelId)) {
-            out.channels.set(value.channelId, { id: value.channelId, name, handle });
-          } else if (handle && !out.channels.get(value.channelId).handle) {
-            out.channels.get(value.channelId).handle = handle;
-          }
-        }
-      }
-      if (value.continuationCommand && typeof value.continuationCommand.token === "string") {
-        out.tokens.push(value.continuationCommand.token);
-      }
-      const entries = Array.isArray(value) ? value.entries() : Object.entries(value);
-      for (const entry of entries) {
-        stack.push({ value: entry[1], depth: current.depth + 1 });
-      }
-    }
-  }
-
-  function logSyncFailure(label, error) {
-    const message = (error && error.message) || String(error || "unknown");
-    console.warn("[FreshFeed] " + label + ":", message);
-    if (browser && browser.storage && browser.storage.local) {
-      browser.storage.local.set({ lastSyncResult: "Ошибка синхронизации: " + message }).catch(() => {});
-    }
-  }
-
-  async function fetchWithTimeout(url, options, timeoutMs) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs || 15000);
-    try {
-      return await fetch(url, { ...options, signal: controller.signal });
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  function parseInitialData(html) {
-    const candidates = [
-      /var ytInitialData\s*=\s*(\{.*?\});\s*<\/script>/s,
-      /ytInitialData"\]\s*=\s*(\{.*?\});\s*<\/script>/s,
-      /\["ytInitialData"\]\s*=\s*(\{.*?\});\s*<\/script>/s,
-      /ytInitialData\s*=\s*(\{.*?\});\s*<\/script>/s,
-      /var ytInitialData\s*=\s*(\{.*?\});/s
-    ];
-    for (const pattern of candidates) {
-      const match = html.match(pattern);
-      if (match) {
-        try {
-          return JSON.parse(match[1]);
-        } catch (error) {
-          throw new Error("not-logged-in");
-        }
-      }
-    }
-    throw new Error("not-logged-in");
-  }
-
-  function htmlValue(html, key) {
-    const match = html.match(new RegExp("\"" + key + "\":\"([^\"]+)\""));
-    return match ? match[1] : "";
-  }
-
-  async function fetchSubscriptions(onProgress) {
-    const response = await fetchWithTimeout("https://www.youtube.com/feed/channels", { credentials: "include" }, 20000);
-    if (!response.ok) {
-      throw new Error(response.status === 401 || response.status === 403 ? "auth" : "fetch");
-    }
-    const html = await response.text();
-    let data;
-    try {
-      data = parseInitialData(html);
-    } catch (error) {
-      if (error && error.message === "not-logged-in") {
-        throw new Error("not-logged-in");
-      }
-      throw error;
-    }
-    const out = { channels: new Map(), tokens: [] };
-    collect(data, out);
-    if (!html.includes("channelRenderer") && !out.tokens.length) {
-      throw new Error("not-logged-in");
-    }
-    const apiKey = htmlValue(html, "INNERTUBE_API_KEY");
-    const clientVersion = htmlValue(html, "INNERTUBE_CLIENT_VERSION");
-    const sessionIndex = htmlValue(html, "SESSION_INDEX") || "0";
-    const hl = htmlValue(html, "HL") || "ru";
-    const gl = htmlValue(html, "GL") || "RU";
-    const seenTokens = new Set();
-    let round = 0;
-    onProgress({ count: out.channels.size, round });
-    while (out.tokens.length && round < 200) {
-      const token = out.tokens[out.tokens.length - 1];
-      out.tokens.length = 0;
-      if (!token || seenTokens.has(token)) {
-        break;
-      }
-      seenTokens.add(token);
-      const headers = {
-        "Content-Type": "application/json",
-        "X-Origin": "https://www.youtube.com",
-        "X-Youtube-Client-Name": "1",
-        "X-Youtube-Client-Version": clientVersion,
-        "X-Goog-AuthUser": sessionIndex
-      };
-      const authorization = await authorizationHeader();
-      if (authorization) {
-        headers.Authorization = authorization;
-      }
-      const continuationResponse = await fetchWithTimeout("https://www.youtube.com/youtubei/v1/browse?key=" + encodeURIComponent(apiKey) + "&prettyPrint=false", {
-        method: "POST",
-        credentials: "include",
-        headers,
-        body: JSON.stringify({
-          context: { client: { clientName: "WEB", clientVersion, hl, gl } },
-          continuation: token
-        })
-      }, 20000);
-      if (continuationResponse.status === 401 || continuationResponse.status === 403) {
-        throw new Error("auth");
-      }
-      if (!continuationResponse.ok) {
-        throw new Error("fetch");
-      }
-      const continuationData = await continuationResponse.json();
-      const page = { channels: new Map(), tokens: [] };
-      collect(continuationData, page);
-      page.channels.forEach((channel, id) => {
-        if (!out.channels.has(id)) {
-          out.channels.set(id, channel);
-        } else if (channel.handle && !out.channels.get(id).handle) {
-          out.channels.get(id).handle = channel.handle;
-        }
-      });
-      out.tokens.push(...page.tokens);
-      round += 1;
-      onProgress({ count: out.channels.size, round });
-    }
-    const channels = { ids: [], handles: [], names: [] };
-    out.channels.forEach((channel) => {
-      channels.ids.push(channel.id);
-      if (channel.handle) {
-        channels.handles.push(channel.handle);
-      }
-      channels.names.push(channel.name);
-    });
-    return normalizeChannelState(channels);
-  }
-
   async function waitForReady() {
     if (document.readyState === "loading") {
       await new Promise((resolve) => document.addEventListener("DOMContentLoaded", resolve, { once: true }));
@@ -591,53 +395,19 @@
   }
 
   async function runPrimarySync(userInitiated) {
-    const startedAt = Date.now();
-    const report = createProgressWriter("fetch", startedAt);
-    await browser.storage.local.set({ syncProgress: { count: 0, phase: "fetch", startedAt } });
-    try {
-      const channels = await fetchSubscriptions(({ count, round }) => {
-        report(count, round);
-        if (userInitiated) {
-          overlayProgress(count, startedAt, "fetch");
-        }
-      });
-      await report.finish();
-      const total = channelCount(channels);
-      state.channels = channels;
-      state.syncedAt = Date.now();
-      state.syncPending = false;
-      state.syncFallback = false;
-      state.syncLock = null;
-      state.syncProgress = null;
-      const result = "Синхронизировано: " + total + " каналов (" + Math.floor((Date.now() - startedAt) / 1000) + " с)";
-      await browser.storage.local.set({
-        channels,
-        syncedAt: state.syncedAt,
-        syncPending: false,
-        syncLock: null,
-        syncProgress: null,
-        syncFallback: false,
-        lastSyncResult: result
-      });
-      updateSets();
-      if (userInitiated) {
-        showOverlay("FreshFeed: готово, " + total + " каналов", false);
-        removeOverlayLater();
-      }
-    } catch (error) {
-      await report.finish();
-      const message = (error && error.message) || String(error || "unknown");
-      logSyncFailure("primary sync", error);
-      await browser.storage.local.set({
-        syncLock: null,
-        syncProgress: null,
-        syncFallback: userInitiated,
-        lastSyncResult: "Ошибка синхронизации: " + message
-      });
-      if (userInitiated) {
-        showOverlay("FreshFeed: не удалось получить подписки автоматически — открываю страницу подписок…", true);
-        location.href = "/feed/channels";
-      }
+    if (!userInitiated) {
+      return;
+    }
+    await browser.storage.local.set({
+      syncFallback: true,
+      syncLock: null,
+      syncProgress: null,
+      lastSyncResult: "Открываю страницу подписок для ручной синхронизации…"
+    });
+    if (location.pathname !== "/feed/channels") {
+      location.href = "/feed/channels";
+    } else {
+      startFallbackSync();
     }
   }
 
@@ -763,42 +533,12 @@
     }
   }
 
-  function lockIsActive(lock) {
-    return Boolean(lock && typeof lock.at === "number" && Date.now() - lock.at < 120000);
-  }
-
   async function maybeStartSync() {
-    if (syncRunning || fallbackRunning || state.syncFallback) {
+    if (syncRunning || fallbackRunning || state.syncFallback || !state.syncPending) {
       return;
     }
     syncRunning = true;
-    const now = Date.now();
-    const forced = state.syncPending === true;
-    const stale = !state.syncedAt || now - state.syncedAt >= 86400000;
-    const attemptedRecently = state.lastAutoSyncAttempt && now - state.lastAutoSyncAttempt < 1800000;
-    if (!forced && (!stale || attemptedRecently)) {
-      syncRunning = false;
-      return;
-    }
-    if (lockIsActive(state.syncLock)) {
-      syncRunning = false;
-      return;
-    }
-    const candidate = { at: now };
-    const staleProgress = state.syncProgress &&
-      typeof state.syncProgress.startedAt === "number" &&
-      now - state.syncProgress.startedAt > 180000;
-    const lockState = { syncLock: candidate, lastAutoSyncAttempt: now };
-    if (staleProgress) {
-      lockState.syncProgress = null;
-    }
-    await browser.storage.local.set(lockState);
-    const saved = await browser.storage.local.get(["syncLock", "syncPending"]);
-    if (!saved.syncLock || saved.syncLock.at !== candidate.at) {
-      syncRunning = false;
-      return;
-    }
-    await runPrimarySync(forced || saved.syncPending === true);
+    await runPrimarySync(true);
     syncRunning = false;
   }
 
@@ -842,9 +582,6 @@
     if (changes.syncedAt) {
       state.syncedAt = changes.syncedAt.newValue || null;
     }
-    if (changes.lastAutoSyncAttempt) {
-      state.lastAutoSyncAttempt = changes.lastAutoSyncAttempt.newValue || null;
-    }
   }
 
   async function init() {
@@ -856,7 +593,6 @@
       "syncLock",
       "syncProgress",
       "syncFallback",
-      "lastAutoSyncAttempt",
       "lastSyncResult"
     ]);
     state.enabled = saved.enabled !== false;
@@ -866,7 +602,9 @@
     state.syncLock = saved.syncLock || null;
     state.syncProgress = saved.syncProgress || null;
     state.syncFallback = Boolean(saved.syncFallback);
-    state.lastAutoSyncAttempt = saved.lastAutoSyncAttempt || null;
+    if (saved.lastSyncResult === "Ошибка синхронизации: fetch") {
+      await browser.storage.local.set({ lastSyncResult: null });
+    }
     updateSets();
     browser.storage.onChanged.addListener(applyStorage);
     window.addEventListener("yt-navigate-finish", updatePageMode);
@@ -885,7 +623,7 @@
     updatePageMode();
     if (state.syncFallback && location.pathname === "/feed/channels") {
       startFallbackSync();
-    } else {
+    } else if (state.syncPending) {
       maybeStartSync();
     }
   }

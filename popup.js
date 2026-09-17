@@ -46,7 +46,7 @@
     }
     enabled.checked = data.enabled !== false;
     count.textContent = "Каналов: " + channelCount(channels);
-    synced.textContent = "Последняя синхронизация: " + (data.syncedAt ? new Date(data.syncedAt).toLocaleString("ru-RU") : "ещё не было");
+    synced.textContent = "Последняя ручная синхронизация: " + (data.syncedAt ? new Date(data.syncedAt).toLocaleString("ru-RU") : "ещё не было");
     progressWrap.hidden = !progress;
     if (progress) {
       progressText.textContent = "Синхронизация… найдено " + (progress.count || 0);
