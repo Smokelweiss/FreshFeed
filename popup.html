@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FreshFeed</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <h1>FreshFeed</h1>
+    <label class="switch-row">
+      <span>Включено</span>
+      <input id="enabled" type="checkbox">
+      <span class="switch" aria-hidden="true"></span>
+    </label>
+    <p id="count">Каналов: 0</p>
+    <p id="synced">Последняя синхронизация: ещё не было</p>
+    <div id="progress-wrap" hidden>
+      <div class="progress-bar"><span></span></div>
+      <p id="progress-text">Синхронизация… найдено 0</p>
+    </div>
+    <p id="result" class="result" hidden></p>
+    <button id="sync" type="button">Синхронизировать подписки</button>
+    <button id="clear" class="secondary" type="button">Очистить список</button>
+    <p class="hint">Подписки обновляются автоматически раз в сутки.</p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

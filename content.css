@@ -1,0 +1,36 @@
+[data-ff-hidden="1"] {
+  display: none !important;
+}
+
+.ff-sync-toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483647;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 10px 14px;
+  border-radius: 6px;
+  color: #fff;
+  background: rgba(20, 20, 20, .94);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, .35);
+  font: 14px/1.35 Arial, sans-serif;
+}
+
+.ff-sync-spinner {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  border: 2px solid rgba(255, 255, 255, .35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: ff-sync-spin .8s linear infinite;
+}
+
+@keyframes ff-sync-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
