@@ -10,7 +10,9 @@
   let blockedIndex = { ids: new Set(), handles: new Set(), customUrls: new Set(), names: new Set() };
   let settings = {
     hideSubscribedChannels: true,
-    hidePlayables: false,
+    hideBlacklisted: true,
+    hideShorts: true,
+    hidePlayables: true,
     hideMembersOnly: false,
     hideMixRadio: false,
     filterUploadDate: false,
@@ -80,7 +82,7 @@
   }
 
   function channelMatches(node) {
-    if (matchesIndex(node, blockedIndex)) return true;
+    if (settings.hideBlacklisted && matchesIndex(node, blockedIndex)) return true;
     return settings.hideSubscribedChannels && matchesIndex(node, index);
   }
 

@@ -5,6 +5,7 @@
     hideSubscribedChannels: document.getElementById("hide-subscribed"),
     hideShorts: document.getElementById("hide-shorts"),
     hidePlayables: document.getElementById("hide-playables"),
+    hideBlacklisted: document.getElementById("hide-blacklisted"),
     hideMembersOnly: document.getElementById("hide-members-only"),
     hideMixRadio: document.getElementById("hide-mix-radio"),
     filterUploadDate: document.getElementById("filter-upload-date"),
@@ -27,7 +28,8 @@
   const defaults = {
     hideSubscribedChannels: true,
     hideShorts: true,
-    hidePlayables: false,
+    hidePlayables: true,
+    hideBlacklisted: true,
     hideMembersOnly: false,
     hideMixRadio: false,
     filterUploadDate: false,

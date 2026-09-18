@@ -28,21 +28,22 @@ Filtering uses a compiled identity index for channel IDs, `@handles`, and legacy
 - No telemetry and no third-party servers.
 - Large local lists use Firefox's unlimited local-storage quota and set-backed lookups rather than scanning every saved channel for every card.
 
-The popup provides only the quick filtering switches for subscribed channels,
-Shorts, Playables, Members-only videos, and Mix/Radio playlists. Detailed
+The popup provides quick filtering switches for Subscribed Channels, Shorts,
+Playables, Blacklisted channels, Members-only videos, and Mix/Radio playlists.
+Detailed
 settings for every filter, subscription synchronization, list clearing, counts,
 blacklist management, import/export, and diagnostics are available from
 **Extension settings**. Subscribe and
 Unsubscribe changes are always synchronized; there is no separate switch.
-Channels added through
-YouTube's **Not recommend this channel** action are always hidden by FreshFeed;
-that behavior is intentionally not optional. Turning another switch off
-preserves its saved data and only disables that behavior.
+Channels added through YouTube's **Not recommend this channel** action are
+stored in the blacklist. Their filtering is controlled by **Hide Blacklisted**;
+turning it off preserves the saved blacklist without hiding those videos.
 
-Additional optional filters are available for YouTube Playables, Members-only
-videos, Mix/Radio playlists, upload age, and duration. Upload-date and
-duration filters support threshold and between-range modes with configurable
-units. The settings page can import blacklist entries from newline lists,
+On a fresh installation, only **Hide Subscribed Channels**, **Hide Shorts**,
+**Hide YouTube Playables**, and **Hide Blacklisted** are enabled. Additional
+filters are off until enabled. Upload-date and duration filters support
+threshold and between-range modes with configurable units. The settings page
+can import blacklist entries from newline lists,
 JSON, or CSV, and export a FilterTube-compatible newline list plus JSON/CSV
 variants. Imports can either merge with or replace the current blacklist. On a
 video watch page, the three-dot menu includes a native-styled **Hide this

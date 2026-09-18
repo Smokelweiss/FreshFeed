@@ -7,7 +7,8 @@
   const DEFAULT_SETTINGS = {
     hideSubscribedChannels: true,
     hideShorts: true,
-    hidePlayables: false,
+    hidePlayables: true,
+    hideBlacklisted: true,
     hideMembersOnly: false,
     hideMixRadio: false,
     filterUploadDate: false,
@@ -353,7 +354,7 @@
       customUrls: blockedCustomUrls,
       names: blockedNames
     });
-    if (blockedMatch) {
+    if (blockedMatch && state.settings.hideBlacklisted) {
       return true;
     }
     if (isShort && !state.settings.hideShorts) {
@@ -365,7 +366,7 @@
       customUrls,
       names
     });
-    return subscribedMatch || blockedMatch;
+    return subscribedMatch || (state.settings.hideBlacklisted && blockedMatch);
   }
 
   function isSubscribed(channel) {
