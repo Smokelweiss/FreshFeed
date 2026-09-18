@@ -4,7 +4,6 @@
   const settingControls = {
     hideSubscribedChannels: document.getElementById("hide-subscribed"),
     hideShorts: document.getElementById("hide-shorts"),
-    updateAfterSubscriptionChange: document.getElementById("update-subscriptions"),
     hidePlayables: document.getElementById("hide-playables"),
     hideMembersOnly: document.getElementById("hide-members-only"),
     hideMixRadio: document.getElementById("hide-mix-radio"),
@@ -12,8 +11,26 @@
     filterDuration: document.getElementById("filter-duration")
   };
   const numericControls = {
-    uploadDateDays: document.getElementById("upload-date-days"),
-    maxDurationMinutes: document.getElementById("max-duration-minutes")
+    uploadDateValue: document.getElementById("upload-date-value"),
+    uploadDateMin: document.getElementById("upload-date-min"),
+    uploadDateMax: document.getElementById("upload-date-max"),
+    durationValue: document.getElementById("duration-value"),
+    durationMin: document.getElementById("duration-min"),
+    durationMax: document.getElementById("duration-max")
+  };
+  const selectControls = {
+    uploadDateMode: document.getElementById("upload-date-mode"),
+    uploadDateUnit: document.getElementById("upload-date-unit"),
+    durationMode: document.getElementById("duration-mode"),
+    durationUnit: document.getElementById("duration-unit")
+  };
+  const optionGroups = {
+    uploadDate: document.getElementById("upload-date-options"),
+    duration: document.getElementById("duration-options")
+  };
+  const betweenGroups = {
+    uploadDate: document.getElementById("upload-date-between"),
+    duration: document.getElementById("duration-between")
   };
   const count = document.getElementById("count");
   const synced = document.getElementById("synced");
@@ -61,22 +78,39 @@
     const settings = {
       hideSubscribedChannels: true,
       hideShorts: true,
-      updateAfterSubscriptionChange: true,
       hidePlayables: false,
       hideMembersOnly: false,
       hideMixRadio: false,
       filterUploadDate: false,
-      uploadDateDays: 30,
+      uploadDateMode: "olderThan",
+      uploadDateUnit: "days",
+      uploadDateValue: 30,
+      uploadDateMin: 1,
+      uploadDateMax: 30,
       filterDuration: false,
-      maxDurationMinutes: 60,
+      durationMode: "longerThan",
+      durationUnit: "minutes",
+      durationValue: 60,
+      durationMin: 1,
+      durationMax: 60,
       ...data
     };
     Object.entries(settingControls).forEach(([key, control]) => {
       control.checked = settings[key] !== false;
     });
     Object.entries(numericControls).forEach(([key, control]) => {
-      control.value = Number(settings[key]) || (key === "uploadDateDays" ? 30 : 60);
+      const fallback = key.includes("Min") ? 1 : key.includes("Date") ? 30 : 60;
+      control.value = Number(settings[key]) || fallback;
     });
+    Object.entries(selectControls).forEach(([key, control]) => {
+      control.value = settings[key];
+    });
+    optionGroups.uploadDate.hidden = !settings.filterUploadDate;
+    optionGroups.duration.hidden = !settings.filterDuration;
+    betweenGroups.uploadDate.hidden = settings.uploadDateMode !== "between";
+    betweenGroups.duration.hidden = settings.durationMode !== "between";
+    document.querySelector(".unit-label").textContent = settings.uploadDateUnit;
+    document.querySelector(".duration-unit-label").textContent = settings.durationUnit;
     count.textContent = "Subscribed: " + channelCount(channels) + " · Blacklisted: " + channelCount(blocked);
     synced.textContent = "Last sync: " + (data.syncedAt ? new Date(data.syncedAt).toLocaleString("en-US") : "never");
     progressWrap.hidden = !progress;
@@ -93,11 +127,11 @@
   }
 
   async function refresh() {
-    render(await browser.storage.local.get(["channels", "blockedChannels", "syncedAt", "syncProgress", "syncPending", "syncPendingAt", "lastSyncResult", ...Object.keys(settingControls), ...Object.keys(numericControls)]));
+    render(await browser.storage.local.get(["channels", "blockedChannels", "syncedAt", "syncProgress", "syncPending", "syncPendingAt", "lastSyncResult", ...Object.keys(settingControls), ...Object.keys(numericControls), ...Object.keys(selectControls)]));
   }
 
   Object.entries(settingControls).forEach(([key, control]) => {
-    control.addEventListener("change", () => browser.storage.local.set({ [key]: control.checked }));
+    control.addEventListener("change", () => browser.storage.local.set({ [key]: control.checked }).then(refresh));
   });
   Object.entries(numericControls).forEach(([key, control]) => {
     control.addEventListener("change", () => {
@@ -105,6 +139,11 @@
       control.value = value;
       browser.storage.local.set({ [key]: value });
     });
+    Object.entries(selectControls).forEach(([key, control]) => {
+      control.addEventListener("change", () => browser.storage.local.set({ [key]: control.value }).then(refresh));
+    });
+    settingControls.filterUploadDate.addEventListener("change", refresh);
+    settingControls.filterDuration.addEventListener("change", refresh);
   });
   sync.addEventListener("click", async () => {
     await browser.storage.local.set({ syncPending: true, syncPendingAt: Date.now() });

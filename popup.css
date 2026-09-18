@@ -30,6 +30,37 @@ p {
   align-items: center;
   justify-content: space-between;
   cursor: pointer;
+  gap: 10px;
+  min-height: 28px;
+}
+
+.filter-group {
+  margin-top: 6px;
+  padding-top: 2px;
+}
+
+.filter-options {
+  display: grid;
+  gap: 6px;
+  margin: 2px 0 8px 8px;
+  color: #5f6368;
+  font-size: 12px;
+}
+
+.filter-options label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+select {
+  max-width: 150px;
+  padding: 2px;
+  border: 1px solid #dadce0;
+  border-radius: 3px;
+  background: #fff;
+  font: inherit;
 }
 
 .switch-row input {

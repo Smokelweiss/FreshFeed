@@ -7,14 +7,21 @@
   const DEFAULT_SETTINGS = {
     hideSubscribedChannels: true,
     hideShorts: true,
-    updateAfterSubscriptionChange: true,
     hidePlayables: false,
     hideMembersOnly: false,
     hideMixRadio: false,
     filterUploadDate: false,
-    uploadDateDays: 30,
+    uploadDateMode: "olderThan",
+    uploadDateUnit: "days",
+    uploadDateValue: 30,
+    uploadDateMin: 1,
+    uploadDateMax: 30,
     filterDuration: false,
-    maxDurationMinutes: 60
+    durationMode: "longerThan",
+    durationUnit: "minutes",
+    durationValue: 60,
+    durationMin: 1,
+    durationMax: 60
   };
   let state = {
     enabled: true,
@@ -92,11 +99,18 @@
 
   function normalizeSettings(saved) {
     const source = saved && typeof saved === "object" ? saved : {};
-    return Object.fromEntries(Object.keys(DEFAULT_SETTINGS).map((key) => {
-      if (Object.prototype.hasOwnProperty.call(source, key)) {
-        return [key, source[key] !== false];
+    const migrated = {
+      ...source,
+      uploadDateValue: source.uploadDateValue ?? source.uploadDateDays,
+      durationValue: source.durationValue ?? (source.maxDurationMinutes ?? 60)
+    };
+    return Object.fromEntries(Object.entries(DEFAULT_SETTINGS).map(([key, fallback]) => {
+      if (!Object.prototype.hasOwnProperty.call(migrated, key) || migrated[key] === undefined) {
+        return [key, key === "hideSubscribedChannels" ? migrated.enabled !== false : fallback];
       }
-      return [key, key === "hideSubscribedChannels" ? source.enabled !== false : DEFAULT_SETTINGS[key]];
+      if (typeof fallback === "boolean") return [key, migrated[key] !== false];
+      if (typeof fallback === "number") return [key, Number.isFinite(Number(migrated[key])) ? Number(migrated[key]) : fallback];
+      return [key, typeof migrated[key] === "string" && migrated[key] ? migrated[key] : fallback];
     }));
   }
 
@@ -285,13 +299,43 @@
       };
     }
 
+    function dateUnitDays(unit) {
+      return { days: 1, weeks: 7, months: 30, years: 365 }[unit] || 1;
+    }
+
+    function durationUnitSeconds(unit) {
+      return { seconds: 1, minutes: 60, hours: 3600, days: 86400 }[unit] || 60;
+    }
+
+    function dateFilterMatches(daysOld) {
+      const unitDays = dateUnitDays(state.settings.uploadDateUnit);
+      const value = Number(state.settings.uploadDateValue) * unitDays;
+      if (state.settings.uploadDateMode === "between") {
+        const min = Number(state.settings.uploadDateMin) * unitDays;
+        const max = Number(state.settings.uploadDateMax) * unitDays;
+        return daysOld < Math.min(min, max) || daysOld > Math.max(min, max);
+      }
+      return daysOld > value;
+    }
+
+    function durationFilterMatches(seconds) {
+      const unitSeconds = durationUnitSeconds(state.settings.durationUnit);
+      const value = Number(state.settings.durationValue) * unitSeconds;
+      if (state.settings.durationMode === "between") {
+        const min = Number(state.settings.durationMin) * unitSeconds;
+        const max = Number(state.settings.durationMax) * unitSeconds;
+        return seconds < Math.min(min, max) || seconds > Math.max(min, max);
+      }
+      return seconds > value;
+    }
+
     function shouldHideByContent(card) {
       const flags = cardContentFlags(card);
       if (flags.isPlayable && state.settings.hidePlayables) return true;
       if (flags.isMembersOnly && state.settings.hideMembersOnly) return true;
       if (flags.isMixRadio && state.settings.hideMixRadio) return true;
-      if (state.settings.filterUploadDate && flags.daysOld !== null && flags.daysOld > Number(state.settings.uploadDateDays)) return true;
-      if (state.settings.filterDuration && flags.durationSeconds !== null && flags.durationSeconds > Number(state.settings.maxDurationMinutes) * 60) return true;
+      if (state.settings.filterUploadDate && flags.daysOld !== null && dateFilterMatches(flags.daysOld)) return true;
+      if (state.settings.filterDuration && flags.durationSeconds !== null && durationFilterMatches(flags.durationSeconds)) return true;
       return false;
     }
     const subscribedMatch = state.settings.hideSubscribedChannels && matchesIndex(channel, {
@@ -1074,7 +1118,7 @@
   }
 
   async function syncFromSubscribeButton(button) {
-    if (!button || !state.settings.updateAfterSubscriptionChange) {
+    if (!button) {
       return;
     }
     let channel = ownerChannel();

@@ -14,9 +14,17 @@
     hideMembersOnly: false,
     hideMixRadio: false,
     filterUploadDate: false,
-    uploadDateDays: 30,
+    uploadDateMode: "olderThan",
+    uploadDateUnit: "days",
+    uploadDateValue: 30,
+    uploadDateMin: 1,
+    uploadDateMax: 30,
     filterDuration: false,
-    maxDurationMinutes: 60
+    durationMode: "longerThan",
+    durationUnit: "minutes",
+    durationValue: 60,
+    durationMin: 1,
+    durationMax: 60
   };
 
   function normalize(value) {
@@ -112,15 +120,45 @@
     return Number(match[1]) * multipliers[match[2]];
   }
 
+  function dateUnitDays(unit) {
+    return { days: 1, weeks: 7, months: 30, years: 365 }[unit] || 1;
+  }
+
+  function durationUnitSeconds(unit) {
+    return { seconds: 1, minutes: 60, hours: 3600, days: 86400 }[unit] || 60;
+  }
+
+  function dateFilterMatches(daysOld) {
+    const unitDays = dateUnitDays(settings.uploadDateUnit);
+    const value = Number(settings.uploadDateValue) * unitDays;
+    if (settings.uploadDateMode === "between") {
+      const min = Number(settings.uploadDateMin) * unitDays;
+      const max = Number(settings.uploadDateMax) * unitDays;
+      return daysOld < Math.min(min, max) || daysOld > Math.max(min, max);
+    }
+    return daysOld > value;
+  }
+
+  function durationFilterMatches(seconds) {
+    const unitSeconds = durationUnitSeconds(settings.durationUnit);
+    const value = Number(settings.durationValue) * unitSeconds;
+    if (settings.durationMode === "between") {
+      const min = Number(settings.durationMin) * unitSeconds;
+      const max = Number(settings.durationMax) * unitSeconds;
+      return seconds < Math.min(min, max) || seconds > Math.max(min, max);
+    }
+    return seconds > value;
+  }
+
   function contentMatches(node, rendererKey) {
     const text = textOf(node);
     if (settings.hidePlayables && (rendererKey.includes("playable") || text.includes("playables"))) return true;
     if (settings.hideMembersOnly && (text.includes("members-only") || text.includes("members only") || text.includes("members"))) return true;
     if (settings.hideMixRadio && (rendererKey.includes("radio") || rendererKey.includes("mix") || rendererKey.includes("playlist") && text.includes("mix"))) return true;
     const age = ageDays(node);
-    if (settings.filterUploadDate && age !== null && age > Number(settings.uploadDateDays)) return true;
+    if (settings.filterUploadDate && age !== null && dateFilterMatches(age)) return true;
     const duration = durationSeconds(node);
-    if (settings.filterDuration && duration !== null && duration > Number(settings.maxDurationMinutes) * 60) return true;
+    if (settings.filterDuration && duration !== null && durationFilterMatches(duration)) return true;
     return false;
   }
 

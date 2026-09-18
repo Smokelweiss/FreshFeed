@@ -28,7 +28,7 @@
 
 **Interfaces:**
 - Consumes: existing `channels`, `enabled`, `updateSets()`, `markCard()`, and popup storage rendering.
-- Produces: `blockedChannels`, `hideSubscribedChannels`, `hideShorts`, and `updateAfterSubscriptionChange` storage keys; separate blocked/subscribed indexes used by filtering. The blocked index is always enforced.
+- Produces: `blockedChannels`, `hideSubscribedChannels`, and `hideShorts` storage keys; separate blocked/subscribed indexes used by filtering. The blocked index is always enforced, and subscription changes are always synchronized.
 
 - [x] **Step 1: Define defaults and normalized blocked state**
 
@@ -38,7 +38,6 @@ Add a `DEFAULT_SETTINGS` object and normalize `blockedChannels` through the same
 const DEFAULT_SETTINGS = {
   hideSubscribedChannels: true,
   hideShorts: true,
-  updateAfterSubscriptionChange: true
 };
 ```
 
@@ -150,7 +149,6 @@ Render the labeled switch rows with stable IDs:
 ```html
 <input id="hide-subscribed" type="checkbox">
 <input id="hide-shorts" type="checkbox">
-<input id="update-subscriptions" type="checkbox">
 ```
 
 - [x] **Step 2: Remove clutter**

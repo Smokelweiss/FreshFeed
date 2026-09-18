@@ -32,7 +32,6 @@ The global `enabled` switch will be replaced by independent settings:
 
 - `hideSubscribedChannels`
 - `hideShorts`
-- `updateAfterSubscriptionChange`
 
 The remaining settings default to enabled for backward-compatible behavior.
 Channels captured through YouTube's channel-level “Not interested” action are
