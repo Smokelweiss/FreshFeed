@@ -30,8 +30,9 @@ Filtering uses a compiled identity index for channel IDs, `@handles`, and legacy
 
 The popup provides only the quick filtering switches for subscribed channels,
 Shorts, Playables, Members-only videos, and Mix/Radio playlists. Detailed
-date/duration controls, subscription synchronization, list clearing, counts,
-and diagnostics are available from **Extension settings**. Subscribe and
+settings for every filter, subscription synchronization, list clearing, counts,
+blacklist management, import/export, and diagnostics are available from
+**Extension settings**. Subscribe and
 Unsubscribe changes are always synchronized; there is no separate switch.
 Channels added through
 YouTube's **Not recommend this channel** action are always hidden by FreshFeed;
@@ -41,8 +42,9 @@ preserves its saved data and only disables that behavior.
 Additional optional filters are available for YouTube Playables, Members-only
 videos, Mix/Radio playlists, upload age, and duration. Upload-date and
 duration filters support threshold and between-range modes with configurable
-units. Use **Extension settings** for these controls, subscription sync,
-list clearing, and diagnostics. On a
+units. The settings page can import blacklist entries from newline lists,
+JSON, or CSV, and export a FilterTube-compatible newline list plus JSON/CSV
+variants. Imports can either merge with or replace the current blacklist. On a
 video watch page, the three-dot menu includes a native-styled **Hide this
 channel** action that adds the current channel to the FreshFeed blacklist.
 
