@@ -524,11 +524,16 @@
         ).forEach((item) => item.remove());
       }
       const menu = findOpenMenu();
-      if (!menu || menu.querySelector("[data-ff-video-block-channel]")) return;
+      if (!menu) return;
+      if (menu.querySelector("[data-ff-video-block-channel]")) {
+        expandInjectedMenu(menu);
+        return;
+      }
       if (location.pathname.startsWith("/watch")) {
         const channel = ownerChannel();
         if (hasChannelData(channel)) {
           menu.appendChild(createBlockMenuItem(channel, null));
+          expandInjectedMenu(menu);
         }
         return;
       }
@@ -543,7 +548,24 @@
         : extractChannel(card);
       if (card && hasChannelData(channel)) {
         menu.appendChild(createBlockMenuItem(channel, card));
+        expandInjectedMenu(menu);
       }
+    }
+
+    function expandInjectedMenu(menu) {
+      if (menu.closest(".ytp-panel-menu, .ytp-settings-menu")) return;
+      const popup = menu.closest("ytd-menu-popup-renderer");
+      if (!popup) return;
+      popup.style.maxHeight = "none";
+      popup.style.height = "auto";
+      popup.style.overflow = "hidden";
+      popup.style.overflowX = "hidden";
+      popup.style.overflowY = "hidden";
+      menu.style.maxHeight = "none";
+      menu.style.height = "auto";
+      menu.style.overflow = "hidden";
+      menu.style.overflowX = "hidden";
+      menu.style.overflowY = "hidden";
     }
 
     function findOpenFeedCardContext() {
