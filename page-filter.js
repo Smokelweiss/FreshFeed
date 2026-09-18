@@ -73,9 +73,9 @@
   }
 
   function channelMatches(node) {
+    if (matchesIndex(node, blockedIndex)) return true;
     if (location.pathname === "/" && !settings.filterRecommendations) return false;
-    return (settings.hideSubscribedChannels && matchesIndex(node, index)) ||
-      matchesIndex(node, blockedIndex);
+    return settings.hideSubscribedChannels && matchesIndex(node, index);
   }
 
   function textOf(node) {
@@ -115,6 +115,7 @@
   }
 
   function contentMatches(node, rendererKey) {
+    if (location.pathname === "/" && !settings.filterRecommendations) return false;
     const text = textOf(node);
     if (settings.hidePlayables && (rendererKey.includes("playable") || text.includes("playables"))) return true;
     if (settings.hideMembersOnly && (text.includes("members-only") || text.includes("members only") || text.includes("members"))) return true;

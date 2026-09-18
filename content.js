@@ -227,6 +227,15 @@
   }
 
   function isHiddenChannel(channel, isShort) {
+    const blockedMatch = matchesIndex(channel, {
+      ids: blockedIds,
+      handles: blockedHandles,
+      customUrls: blockedCustomUrls,
+      names: blockedNames
+    });
+    if (blockedMatch) {
+      return true;
+    }
     if (isShort && !state.settings.hideShorts) {
       return false;
     }
@@ -278,6 +287,9 @@
     }
 
     function shouldHideByContent(card) {
+      if (location.pathname === "/" && !state.settings.filterRecommendations) {
+        return false;
+      }
       const flags = cardContentFlags(card);
       if (flags.isPlayable && state.settings.hidePlayables) return true;
       if (flags.isMembersOnly && state.settings.hideMembersOnly) return true;
@@ -286,20 +298,11 @@
       if (state.settings.filterDuration && flags.durationSeconds !== null && flags.durationSeconds > Number(state.settings.maxDurationMinutes) * 60) return true;
       return false;
     }
-    if (location.pathname === "/" && !state.settings.filterRecommendations) {
-      return false;
-    }
     const subscribedMatch = state.settings.hideSubscribedChannels && matchesIndex(channel, {
       ids,
       handles,
       customUrls,
       names
-    });
-    const blockedMatch = matchesIndex(channel, {
-      ids: blockedIds,
-      handles: blockedHandles,
-      customUrls: blockedCustomUrls,
-      names: blockedNames
     });
     return subscribedMatch || blockedMatch;
   }
