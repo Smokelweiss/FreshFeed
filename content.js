@@ -517,6 +517,12 @@
     }
 
     function injectVideoBlockMenuItem() {
+      if (location.pathname.startsWith("/watch")) {
+        document.querySelectorAll(
+          ".ytp-panel-menu [data-ff-video-block-channel], " +
+          ".ytp-settings-menu [data-ff-video-block-channel]"
+        ).forEach((item) => item.remove());
+      }
       const menu = findOpenMenu();
       if (!menu || menu.querySelector("[data-ff-video-block-channel]")) return;
       if (location.pathname.startsWith("/watch")) {
@@ -560,7 +566,10 @@
       );
       return Array.from(candidates).reverse().find((element) => {
         const rect = element.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
+        const isPlayerSettingsMenu = element.closest(
+          ".ytp-panel-menu, .ytp-settings-menu"
+        );
+        return rect.width > 0 && rect.height > 0 && !isPlayerSettingsMenu;
       }) || null;
     }
   }
