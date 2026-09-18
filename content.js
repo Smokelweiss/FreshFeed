@@ -70,7 +70,7 @@
       return {};
     }
     if (parts[0].toLowerCase() === "channel" && /^UC[\w-]+$/i.test(parts[1] || "")) {
-      return { id: parts[1] };
+      return { id: parts[1].toLowerCase() };
     }
     if (parts[0].startsWith("@")) {
       return { handle: parts[0].toLowerCase() };
@@ -89,7 +89,7 @@
   function normalizeChannelState(channels) {
     const source = channels && typeof channels === "object" ? channels : {};
     return {
-      ids: Array.from(new Set(Array.isArray(source.ids) ? source.ids.filter((item) => /^UC[\w-]+$/i.test(item)) : [])),
+      ids: Array.from(new Set(Array.isArray(source.ids) ? source.ids.map((item) => String(item).toLowerCase()).filter((item) => /^uc[\w-]+$/i.test(item)) : [])),
       handles: Array.from(new Set(Array.isArray(source.handles) ? source.handles.map((item) => String(item).toLowerCase()).filter((item) => /^@[^/]+$/.test(item)) : [])),
       customUrls: Array.from(new Set(Array.isArray(source.customUrls) ? source.customUrls.map(normCustomUrl).filter(Boolean) : [])),
       names: Array.from(new Set(Array.isArray(source.names) ? source.names.map(normName).filter(Boolean) : [])),
@@ -176,7 +176,7 @@
     }
     seen.add(value);
     if (typeof value.browseId === "string" && /^UC[\w-]+$/i.test(value.browseId)) {
-      result.ids.add(value.browseId);
+      result.ids.add(value.browseId.toLowerCase());
     }
     if (typeof value.canonicalBaseUrl === "string" && value.canonicalBaseUrl.startsWith("/@")) {
       const parsed = parseChannelHref(value.canonicalBaseUrl);
@@ -206,6 +206,9 @@
     });
     const nameSelectors = [
       "ytd-channel-name #text",
+      "#channel-name #text",
+      "#channel-name a",
+      "ytd-channel-name a",
       "yt-formatted-string#text.ytd-channel-name",
       "yt-content-metadata-view-model .yt-content-metadata-view-model__metadata-text",
       "yt-content-metadata-view-model .yt-core-attributed-string"
@@ -801,19 +804,20 @@
     }
     if (typeof node.channelId === "string" && /^UC[\w-]+$/i.test(node.channelId)) {
       const name = channelTitle(node.title);
-      const canonical = node.navigationEndpoint &&
-        node.navigationEndpoint.browseEndpoint &&
-        node.navigationEndpoint.browseEndpoint.canonicalBaseUrl;
+      const endpoint = node.navigationEndpoint &&
+        node.navigationEndpoint.browseEndpoint;
+      const canonical = endpoint && endpoint.canonicalBaseUrl;
       const handle = typeof canonical === "string" && canonical.startsWith("/@")
         ? canonical.split("/")[1].toLowerCase()
         : "";
       const customUrl = typeof canonical === "string" ? normCustomUrl(canonical) : "";
-      if (!result.channels.has(node.channelId)) {
-        result.channels.set(node.channelId, { id: node.channelId, name, handle, customUrl });
-      } else if (handle && !result.channels.get(node.channelId).handle) {
-        result.channels.get(node.channelId).handle = handle;
-      } else if (customUrl && !result.channels.get(node.channelId).customUrl) {
-        result.channels.get(node.channelId).customUrl = customUrl;
+      const channelId = node.channelId.toLowerCase();
+      if (!result.channels.has(channelId)) {
+        result.channels.set(channelId, { id: channelId, name, handle, customUrl });
+      } else if (handle && !result.channels.get(channelId).handle) {
+        result.channels.get(channelId).handle = handle;
+      } else if (customUrl && !result.channels.get(channelId).customUrl) {
+        result.channels.get(channelId).customUrl = customUrl;
       }
     }
     if (node.continuationCommand && typeof node.continuationCommand.token === "string") {

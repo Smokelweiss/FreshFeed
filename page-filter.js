@@ -53,8 +53,8 @@
     const visit = (value, depth) => {
       if (!value || typeof value !== "object" || depth > 7 || seen.has(value)) return;
       seen.add(value);
-      if (typeof value.browseId === "string" && /^UC[\w-]+$/i.test(value.browseId)) ids.add(value.browseId);
-      if (typeof value.channelId === "string" && /^UC[\w-]+$/i.test(value.channelId)) ids.add(value.channelId);
+      if (typeof value.browseId === "string" && /^UC[\w-]+$/i.test(value.browseId)) ids.add(value.browseId.toLowerCase());
+      if (typeof value.channelId === "string" && /^UC[\w-]+$/i.test(value.channelId)) ids.add(value.channelId.toLowerCase());
       if (typeof value.canonicalBaseUrl === "string") {
         const url = value.canonicalBaseUrl;
         if (url.startsWith("/@")) handles.add(normalizeHandle(url.split("/")[1]));
@@ -62,7 +62,7 @@
         if (custom) customUrls.add(custom);
       }
       if (typeof value.navigationEndpoint?.browseEndpoint?.browseId === "string") {
-        ids.add(value.navigationEndpoint.browseEndpoint.browseId);
+        ids.add(value.navigationEndpoint.browseEndpoint.browseId.toLowerCase());
       }
       for (const key of ["title", "name", "authorText", "shortBylineText", "longBylineText"]) {
         const candidate = value[key];
