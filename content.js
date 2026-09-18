@@ -481,7 +481,7 @@
     }
 
     function createBlockMenuItem(channel, card) {
-      const item = document.createElement("ytd-menu-service-item-renderer");
+      const item = document.createElement("tp-yt-paper-item");
       item.setAttribute("data-ff-video-block-channel", "1");
       item.setAttribute("role", "menuitem");
       item.setAttribute("aria-label", "Hide this channel");
@@ -489,12 +489,7 @@
       if (isWatchMenu) {
         item.setAttribute("data-ff-watch-menu", "1");
       }
-      item.className = "style-scope ytd-menu-popup-renderer";
-      item.style.cssText = "display:block;visibility:visible;opacity:1";
-      const paperItem = document.createElement("tp-yt-paper-item");
-      paperItem.className = "style-scope ytd-menu-service-item-renderer";
-      paperItem.setAttribute("role", "option");
-      paperItem.style.cssText = "display:flex;align-items:center;box-sizing:border-box;min-height:48px;padding:0 16px;visibility:visible;opacity:1;color:inherit;cursor:pointer";
+      item.style.cssText = "display:flex;align-items:center;box-sizing:border-box;min-height:48px;padding:0 16px;visibility:visible;opacity:1;color:inherit;cursor:pointer";
       const icon = document.createElement("span");
       icon.setAttribute("aria-hidden", "true");
       icon.style.cssText = "margin-right:16px;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;color:inherit";
@@ -511,11 +506,9 @@
       icon.appendChild(svg);
       const label = document.createElement("span");
       label.id = "label";
-      label.className = "style-scope ytd-menu-service-item-renderer";
       label.style.cssText = "display:block;flex:1;visibility:visible;opacity:1;color:inherit;font:inherit;white-space:nowrap";
       label.textContent = "Hide this channel";
-      paperItem.append(icon, label);
-      item.appendChild(paperItem);
+      item.append(icon, label);
       item.addEventListener("click", () => {
         addBlockedChannel(channel, card);
         item.remove();

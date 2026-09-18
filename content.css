@@ -12,7 +12,7 @@
   white-space: nowrap !important;
 }
 
-[data-ff-video-block-channel="1"] > tp-yt-paper-item {
+[data-ff-video-block-channel="1"] {
   display: flex !important;
   align-items: center !important;
   visibility: visible !important;
