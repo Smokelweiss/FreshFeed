@@ -28,10 +28,12 @@ Filtering uses a compiled identity index for channel IDs, `@handles`, and legacy
 - No telemetry and no third-party servers.
 - Large local lists use Firefox's unlimited local-storage quota and set-backed lookups rather than scanning every saved channel for every card.
 
-The popup provides independent switches for subscribed-channel filtering,
-Shorts, Playables, Members-only videos, Mix/Radio playlists, upload dates,
-and duration. Subscribe and Unsubscribe changes are always synchronized;
-there is no separate switch. Channels added through
+The popup provides only the quick filtering switches for subscribed channels,
+Shorts, Playables, Members-only videos, and Mix/Radio playlists. Detailed
+date/duration controls, subscription synchronization, list clearing, counts,
+and diagnostics are available from **Extension settings**. Subscribe and
+Unsubscribe changes are always synchronized; there is no separate switch.
+Channels added through
 YouTube's **Not recommend this channel** action are always hidden by FreshFeed;
 that behavior is intentionally not optional. Turning another switch off
 preserves its saved data and only disables that behavior.
@@ -39,7 +41,8 @@ preserves its saved data and only disables that behavior.
 Additional optional filters are available for YouTube Playables, Members-only
 videos, Mix/Radio playlists, upload age, and duration. Upload-date and
 duration filters support threshold and between-range modes with configurable
-units. On a
+units. Use **Extension settings** for these controls, subscription sync,
+list clearing, and diagnostics. On a
 video watch page, the three-dot menu includes a native-styled **Hide this
 channel** action that adds the current channel to the FreshFeed blacklist.
 

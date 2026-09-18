@@ -11,6 +11,11 @@ body {
   font: 14px/1.4 Arial, sans-serif;
 }
 
+.options-page {
+  width: 420px;
+  max-width: 100%;
+}
+
 h1 {
   margin: 0 0 14px;
   font-size: 18px;
@@ -153,4 +158,31 @@ button.secondary {
 .result {
   color: #137333;
   font-size: 12px;
+}
+
+.error {
+  color: #b3261e;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.diagnostics {
+  margin-top: 18px;
+}
+
+.diagnostics h2 {
+  margin-top: 0;
+}
+
+pre {
+  max-height: 180px;
+  margin: 0 0 8px;
+  padding: 8px;
+  overflow: auto;
+  white-space: pre-wrap;
+  color: #5f6368;
+  background: #f8f9fa;
+  border: 1px solid #dadce0;
+  border-radius: 4px;
+  font: 12px/1.4 monospace;
 }
