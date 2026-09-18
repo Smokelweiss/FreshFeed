@@ -7,7 +7,7 @@
   flex: 1 1 auto !important;
   visibility: visible !important;
   opacity: 1 !important;
-  color: #f00 !important;
+  color: inherit !important;
   font: inherit !important;
   white-space: nowrap !important;
 }
@@ -17,7 +17,7 @@
   align-items: center !important;
   visibility: visible !important;
   opacity: 1 !important;
-  color: #f00 !important;
+  color: inherit !important;
 }
 
 .ff-sync-toast {

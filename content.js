@@ -493,7 +493,7 @@
       paperItem.style.cssText = "display:flex;align-items:center;box-sizing:border-box;min-height:48px;padding:0 16px;visibility:visible;opacity:1;color:inherit;cursor:pointer";
       const icon = document.createElement("yt-icon");
       icon.className = "style-scope ytd-menu-service-item-renderer";
-      icon.style.cssText = "margin-right:16px;width:24px;height:24px;display:inline-flex;color:#f00";
+      icon.style.cssText = "margin-right:16px;width:24px;height:24px;display:inline-flex;color:inherit";
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       svg.setAttribute("viewBox", "0 0 24 24");
       svg.setAttribute("width", "24");
@@ -507,7 +507,7 @@
       const label = document.createElement("span");
       label.id = "label";
       label.className = "style-scope ytd-menu-service-item-renderer";
-      label.style.cssText = "display:block;flex:1;visibility:visible;opacity:1;color:#f00;font:inherit;white-space:nowrap";
+      label.style.cssText = "display:block;flex:1;visibility:visible;opacity:1;color:inherit;font:inherit;white-space:nowrap";
       label.textContent = "Hide this channel";
       paperItem.append(icon, label);
       item.appendChild(paperItem);
@@ -519,7 +519,7 @@
     }
 
     function injectVideoBlockMenuItem() {
-      const menu = document.querySelector("ytd-menu-popup-renderer #items, ytd-menu-popup-renderer tp-yt-paper-listbox, ytd-popup-container ytd-menu-popup-renderer");
+      const menu = findOpenMenu();
       if (!menu || menu.querySelector("[data-ff-video-block-channel]")) return;
       if (location.pathname.startsWith("/watch")) {
         const channel = ownerChannel();
@@ -528,14 +528,42 @@
         }
         return;
       }
-      if (!isFilterSurface() || !lastMenuContext || Date.now() - lastMenuContext.at >= 10000) return;
-      const card = lastMenuContext.card;
-      const channel = lastMenuContext.channel && hasChannelData(lastMenuContext.channel)
-        ? lastMenuContext.channel
+      if (!isFilterSurface()) return;
+      const context = lastMenuContext && Date.now() - lastMenuContext.at < 10000
+        ? lastMenuContext
+        : findOpenFeedCardContext();
+      if (!context) return;
+      const card = context.card;
+      const channel = context.channel && hasChannelData(context.channel)
+        ? context.channel
         : extractChannel(card);
       if (card && hasChannelData(channel)) {
         menu.appendChild(createBlockMenuItem(channel, card));
       }
+    }
+
+    function findOpenFeedCardContext() {
+      const card = Array.from(document.querySelectorAll(CARD_SELECTOR)).reverse().find((candidate) => {
+        return candidate.querySelector(
+          "button[aria-expanded='true'], " +
+          "[aria-expanded='true'][role='button'], " +
+          "ytd-menu-button-renderer[opened], ytd-menu-button-renderer[aria-expanded='true']"
+        );
+      });
+      return card ? { card, channel: extractChannel(card), at: Date.now() } : null;
+    }
+
+    function findOpenMenu() {
+      const candidates = document.querySelectorAll(
+        "ytd-menu-popup-renderer #items, " +
+        "ytd-menu-popup-renderer tp-yt-paper-listbox, " +
+        "ytd-popup-container ytd-menu-popup-renderer, " +
+        "[role='menu'], tp-yt-paper-listbox"
+      );
+      return Array.from(candidates).reverse().find((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }) || null;
     }
   }
 
@@ -649,13 +677,30 @@
     return element && element.closest && element.closest(CARD_SELECTOR);
   }
 
+  function isMoreMenuTrigger(element) {
+    if (!element || !element.closest) return false;
+    const button = element.closest("button, yt-icon-button, ytd-menu-button-renderer, ytd-menu-renderer");
+    if (!button) return false;
+    const text = menuText(button);
+    return text === "more" ||
+      text === "ещё" ||
+      text === "действия" ||
+      text.includes("more actions") ||
+      text.includes("дополнительные действия");
+  }
+
   function observeNotInterestedAction(event) {
     const target = event.target && event.target.closest
       ? event.target.closest("ytd-menu-service-item-renderer, tp-yt-paper-item, [role='menuitem']")
       : null;
     const card = cardForElement(event.target);
-    if (card && event.target.closest && event.target.closest("ytd-menu-button-renderer, ytd-menu-renderer, button[aria-label*='More'], button[aria-label*='more']")) {
+    if (card && isMoreMenuTrigger(event.target)) {
       lastMenuContext = { card, channel: extractChannel(card), at: Date.now() };
+      setTimeout(() => {
+        if (isFilterSurface()) {
+          updatePageMode();
+        }
+      }, 0);
     }
     if (!target || !isNotInterestedItem(target)) {
       return;
