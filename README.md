@@ -33,6 +33,11 @@ The popup provides independent switches for subscribed-channel filtering, the
 Turning a switch off preserves the saved channels and only disables that
 behavior.
 
+Additional optional filters are available for YouTube Playables, Members-only
+videos, Mix/Radio playlists, upload age, and maximum video duration. On a
+video watch page, the three-dot menu includes a native-styled **Hide this
+channel** action that adds the current channel to the FreshFeed blacklist.
+
 The popup lists the active filtering capabilities. If YouTube returns an invalid or expired continuation page during synchronization, FreshFeed skips that page, keeps collecting valid pages, and reports how many pages were unavailable instead of discarding the entire synchronization.
 
 ## Requirements

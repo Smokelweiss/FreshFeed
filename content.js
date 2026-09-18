@@ -9,7 +9,14 @@
     hideNotInterestedChannels: true,
     hideShorts: true,
     filterRecommendations: true,
-    updateAfterSubscriptionChange: true
+    updateAfterSubscriptionChange: true,
+    hidePlayables: false,
+    hideMembersOnly: false,
+    hideMixRadio: false,
+    filterUploadDate: false,
+    uploadDateDays: 30,
+    filterDuration: false,
+    maxDurationMinutes: 60
   };
   let state = {
     enabled: true,
@@ -37,6 +44,7 @@
   let fallbackRunning = false;
   let dynamicTimer = null;
   let lastMenuContext = null;
+  let videoMenuObserver = null;
 
   function normName(value) {
     return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
@@ -223,6 +231,62 @@
     if (isShort && !state.settings.hideShorts) {
       return false;
     }
+
+    function parseDurationSeconds(value) {
+      const parts = String(value || "").trim().split(":").map(Number);
+      if (!parts.length || parts.some((part) => !Number.isFinite(part))) return null;
+      if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+      if (parts.length === 2) return parts[0] * 60 + parts[1];
+      return parts.length === 1 ? parts[0] : null;
+    }
+
+    function ageInDays(value) {
+      const match = String(value || "").toLowerCase().match(/(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago/);
+      if (!match) return null;
+      const amount = Number(match[1]);
+      const unit = match[2];
+      const multipliers = {
+        second: 1 / 86400,
+        minute: 1 / 1440,
+        hour: 1 / 24,
+        day: 1,
+        week: 7,
+        month: 30,
+        year: 365
+      };
+      return amount * multipliers[unit];
+    }
+
+    function cardContentFlags(card) {
+      const text = normName(card && card.textContent);
+      const aria = normName(card && (card.getAttribute("aria-label") || ""));
+      const durationElement = card && card.querySelector(
+        "ytd-thumbnail-overlay-time-status-renderer #text, " +
+        "ytd-thumbnail-overlay-time-status-renderer span, " +
+        ".badge-shape-wiz__text"
+      );
+      const durationSeconds = parseDurationSeconds(durationElement && durationElement.textContent);
+      const metadata = card && card.querySelector("#metadata-line, ytd-video-meta-block, .ytd-video-meta-block");
+      const daysOld = ageInDays(metadata && metadata.textContent);
+      return {
+        isPlayable: text.includes("playables") || aria.includes("playables") || card.matches("ytd-rich-shelf-renderer[is-playlist], ytd-playlist-renderer"),
+        isMembersOnly: text.includes("members-only") || text.includes("members only") || Boolean(card.querySelector(".badge-style-type-members-only, ytd-badge-supported-renderer")),
+        isMixRadio: card.matches("ytd-radio-renderer, ytd-compact-radio-renderer, ytd-playlist-renderer, ytd-compact-playlist-renderer") ||
+          text.includes(" mix") || text.startsWith("mix ") || text.includes("radio"),
+        durationSeconds,
+        daysOld
+      };
+    }
+
+    function shouldHideByContent(card) {
+      const flags = cardContentFlags(card);
+      if (flags.isPlayable && state.settings.hidePlayables) return true;
+      if (flags.isMembersOnly && state.settings.hideMembersOnly) return true;
+      if (flags.isMixRadio && state.settings.hideMixRadio) return true;
+      if (state.settings.filterUploadDate && flags.daysOld !== null && flags.daysOld > Number(state.settings.uploadDateDays)) return true;
+      if (state.settings.filterDuration && flags.durationSeconds !== null && flags.durationSeconds > Number(state.settings.maxDurationMinutes) * 60) return true;
+      return false;
+    }
     if (location.pathname === "/" && !state.settings.filterRecommendations) {
       return false;
     }
@@ -262,7 +326,7 @@
     card.setAttribute("data-ff-checked", "1");
     card.setAttribute("data-ff-href", href);
     const isShort = card.matches("ytd-reel-item-renderer, ytd-rich-shelf-renderer, ytd-reel-shelf-renderer");
-    if (state.enabled && isHiddenChannel(channel, isShort)) {
+    if (state.enabled && (isHiddenChannel(channel, isShort) || shouldHideByContent(card))) {
       card.setAttribute("data-ff-hidden", "1");
     } else {
       card.removeAttribute("data-ff-hidden");
@@ -336,6 +400,47 @@
     }
     if (location.pathname.startsWith("/watch")) {
       scheduleDynamicCheck();
+      installVideoMenuObserver();
+    }
+
+    function installVideoMenuObserver() {
+      if (videoMenuObserver || !document.documentElement) return;
+      videoMenuObserver = new MutationObserver(() => injectVideoBlockMenuItem());
+      videoMenuObserver.observe(document.documentElement, { childList: true, subtree: true });
+      injectVideoBlockMenuItem();
+    }
+
+    function injectVideoBlockMenuItem() {
+      if (!location.pathname.startsWith("/watch") || document.querySelector("[data-ff-video-block-channel]")) return;
+      const menu = document.querySelector("ytd-menu-popup-renderer #items, ytd-menu-popup-renderer tp-yt-paper-listbox, ytd-popup-container ytd-menu-popup-renderer");
+      if (!menu) return;
+      const item = document.createElement("ytd-menu-service-item-renderer");
+      item.setAttribute("data-ff-video-block-channel", "1");
+      item.setAttribute("role", "menuitem");
+      const paperItem = document.createElement("tp-yt-paper-item");
+      paperItem.className = "style-scope ytd-menu-service-item-renderer";
+      const icon = document.createElement("yt-icon");
+      icon.className = "style-scope ytd-menu-service-item-renderer";
+      icon.style.cssText = "margin-right:16px;width:24px;height:24px;display:inline-flex";
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", "0 0 24 24");
+      svg.setAttribute("width", "24");
+      svg.setAttribute("height", "24");
+      svg.setAttribute("aria-hidden", "true");
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("fill", "currentColor");
+      path.setAttribute("d", "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm5 11H7v-2h10v2Z");
+      svg.appendChild(path);
+      icon.appendChild(svg);
+      const label = document.createElement("yt-formatted-string");
+      label.textContent = "Hide this channel";
+      paperItem.append(icon, label);
+      item.appendChild(paperItem);
+      item.addEventListener("click", () => {
+        addBlockedChannel(ownerChannel(), null);
+        item.remove();
+      });
+      menu.appendChild(item);
     }
   }
 

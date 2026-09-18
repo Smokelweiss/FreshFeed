@@ -6,7 +6,16 @@
     hideNotInterestedChannels: document.getElementById("hide-not-interested"),
     hideShorts: document.getElementById("hide-shorts"),
     filterRecommendations: document.getElementById("filter-recommendations"),
-    updateAfterSubscriptionChange: document.getElementById("update-subscriptions")
+    updateAfterSubscriptionChange: document.getElementById("update-subscriptions"),
+    hidePlayables: document.getElementById("hide-playables"),
+    hideMembersOnly: document.getElementById("hide-members-only"),
+    hideMixRadio: document.getElementById("hide-mix-radio"),
+    filterUploadDate: document.getElementById("filter-upload-date"),
+    filterDuration: document.getElementById("filter-duration")
+  };
+  const numericControls = {
+    uploadDateDays: document.getElementById("upload-date-days"),
+    maxDurationMinutes: document.getElementById("max-duration-minutes")
   };
   const count = document.getElementById("count");
   const synced = document.getElementById("synced");
@@ -57,10 +66,20 @@
       hideShorts: true,
       filterRecommendations: true,
       updateAfterSubscriptionChange: true,
+      hidePlayables: false,
+      hideMembersOnly: false,
+      hideMixRadio: false,
+      filterUploadDate: false,
+      uploadDateDays: 30,
+      filterDuration: false,
+      maxDurationMinutes: 60,
       ...data
     };
     Object.entries(settingControls).forEach(([key, control]) => {
       control.checked = settings[key] !== false;
+    });
+    Object.entries(numericControls).forEach(([key, control]) => {
+      control.value = Number(settings[key]) || (key === "uploadDateDays" ? 30 : 60);
     });
     count.textContent = "Subscribed: " + channelCount(channels) + " · Blacklisted: " + channelCount(blocked);
     synced.textContent = "Last sync: " + (data.syncedAt ? new Date(data.syncedAt).toLocaleString("en-US") : "never");
@@ -78,11 +97,18 @@
   }
 
   async function refresh() {
-    render(await browser.storage.local.get(["channels", "blockedChannels", "syncedAt", "syncProgress", "syncPending", "syncPendingAt", "lastSyncResult", ...Object.keys(settingControls)]));
+    render(await browser.storage.local.get(["channels", "blockedChannels", "syncedAt", "syncProgress", "syncPending", "syncPendingAt", "lastSyncResult", ...Object.keys(settingControls), ...Object.keys(numericControls)]));
   }
 
   Object.entries(settingControls).forEach(([key, control]) => {
     control.addEventListener("change", () => browser.storage.local.set({ [key]: control.checked }));
+  });
+  Object.entries(numericControls).forEach(([key, control]) => {
+    control.addEventListener("change", () => {
+      const value = Math.max(Number(control.min), Math.min(Number(control.max), Number(control.value) || Number(control.min)));
+      control.value = value;
+      browser.storage.local.set({ [key]: value });
+    });
   });
   sync.addEventListener("click", async () => {
     await browser.storage.local.set({ syncPending: true, syncPendingAt: Date.now() });

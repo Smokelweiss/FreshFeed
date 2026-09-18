@@ -11,7 +11,14 @@
   let settings = {
     hideSubscribedChannels: true,
     hideNotInterestedChannels: true,
-    filterRecommendations: true
+    filterRecommendations: true,
+    hidePlayables: false,
+    hideMembersOnly: false,
+    hideMixRadio: false,
+    filterUploadDate: false,
+    uploadDateDays: 30,
+    filterDuration: false,
+    maxDurationMinutes: 60
   };
 
   function normalize(value) {
@@ -72,12 +79,69 @@
       (settings.hideNotInterestedChannels && matchesIndex(node, blockedIndex));
   }
 
+  function textOf(node) {
+    const values = [];
+    const seen = new Set();
+    const visit = (value, depth) => {
+      if (!value || typeof value !== "object" || depth > 8 || seen.has(value)) return;
+      seen.add(value);
+      for (const key of ["title", "simpleText", "text", "publishedTimeText", "lengthText", "viewCountText", "badges"]) {
+        const candidate = value[key];
+        if (typeof candidate === "string") values.push(candidate);
+        if (candidate?.simpleText) values.push(candidate.simpleText);
+        if (Array.isArray(candidate?.runs)) values.push(candidate.runs.map((run) => run?.text || "").join(""));
+      }
+      Object.values(value).forEach((child) => visit(child, depth + 1));
+    };
+    visit(node, 0);
+    return values.join(" ").toLowerCase();
+  }
+
+  function durationSeconds(node) {
+    const raw = node?.lengthText?.simpleText || node?.lengthText?.runs?.map((run) => run?.text || "").join("") ||
+      node?.thumbnailOverlays?.find?.((item) => item?.thumbnailOverlayTimeStatusRenderer)?.thumbnailOverlayTimeStatusRenderer?.text?.simpleText;
+    const parts = String(raw || "").trim().split(":").map(Number);
+    if (!parts.length || parts.some((part) => !Number.isFinite(part))) return null;
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    return null;
+  }
+
+  function ageDays(node) {
+    const text = textOf(node);
+    const match = text.match(/(\d+)\s+(day|week|month|year)s?\s+ago/);
+    if (!match) return null;
+    const multipliers = { day: 1, week: 7, month: 30, year: 365 };
+    return Number(match[1]) * multipliers[match[2]];
+  }
+
+  function contentMatches(node, rendererKey) {
+    const text = textOf(node);
+    if (settings.hidePlayables && (rendererKey.includes("playable") || text.includes("playables"))) return true;
+    if (settings.hideMembersOnly && (text.includes("members-only") || text.includes("members only") || text.includes("members"))) return true;
+    if (settings.hideMixRadio && (rendererKey.includes("radio") || rendererKey.includes("mix") || rendererKey.includes("playlist") && text.includes("mix"))) return true;
+    const age = ageDays(node);
+    if (settings.filterUploadDate && age !== null && age > Number(settings.uploadDateDays)) return true;
+    const duration = durationSeconds(node);
+    if (settings.filterDuration && duration !== null && duration > Number(settings.maxDurationMinutes) * 60) return true;
+    return false;
+  }
+
   const rendererKeys = new Set([
     "videoRenderer",
     "richItemRenderer",
     "gridVideoRenderer",
     "compactVideoRenderer",
     "videoWithContextRenderer",
+    "radioRenderer",
+    "compactRadioRenderer",
+    "playlistRenderer",
+    "compactPlaylistRenderer",
+    "richShelfRenderer",
+    "richSectionRenderer",
+    "playableRenderer",
+    "compactMovieRenderer",
+    "movieRenderer",
     "reelItemRenderer",
     "shortsLockupViewModel",
     "shortsLockupViewModelV2",
@@ -88,7 +152,13 @@
     if (!node || typeof node !== "object" || depth > 35) return;
     for (const [key, value] of Object.entries(node)) {
       const isShort = key === "reelItemRenderer" || key === "shortsLockupViewModel" || key === "shortsLockupViewModelV2";
-      if (rendererKeys.has(key) && value && typeof value === "object" && (!isShort || settings.hideShorts) && channelMatches(value)) {
+      if (
+        rendererKeys.has(key) &&
+        value &&
+        typeof value === "object" &&
+        (!isShort || settings.hideShorts) &&
+        (channelMatches(value) || contentMatches(value, key))
+      ) {
         delete node[key];
         continue;
       }
