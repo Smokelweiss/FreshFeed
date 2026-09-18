@@ -52,6 +52,10 @@ p {
   font-size: 12px;
 }
 
+.filter-options[hidden] {
+  display: none;
+}
+
 .filter-options label {
   display: flex;
   align-items: center;

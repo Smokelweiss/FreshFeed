@@ -48,8 +48,12 @@
     Object.entries(settingControls).forEach(([key, control]) => { control.checked = settings[key] !== false; });
     Object.entries(numericControls).forEach(([key, control]) => { control.value = Number(settings[key]) || (key.includes("Min") ? 1 : key.includes("Date") ? 30 : 60); });
     Object.entries(selectControls).forEach(([key, control]) => { control.value = settings[key]; });
-    document.getElementById("upload-date-options").hidden = !settings.filterUploadDate;
-    document.getElementById("duration-options").hidden = !settings.filterDuration;
+    const uploadDateOptions = document.getElementById("upload-date-options");
+    const durationOptions = document.getElementById("duration-options");
+    uploadDateOptions.hidden = !settings.filterUploadDate;
+    durationOptions.hidden = !settings.filterDuration;
+    uploadDateOptions.setAttribute("aria-hidden", String(!settings.filterUploadDate));
+    durationOptions.setAttribute("aria-hidden", String(!settings.filterDuration));
     document.getElementById("upload-date-between").hidden = settings.uploadDateMode !== "between";
     document.getElementById("duration-between").hidden = settings.durationMode !== "between";
     document.querySelector(".unit-label").textContent = settings.uploadDateUnit;
