@@ -486,8 +486,13 @@
       const item = document.createElement("ytd-menu-service-item-renderer");
       item.setAttribute("data-ff-video-block-channel", "1");
       item.setAttribute("role", "menuitem");
+      item.setAttribute("aria-label", "Hide this channel");
+      item.className = "style-scope ytd-menu-popup-renderer";
+      item.style.cssText = "display:block;visibility:visible;opacity:1";
       const paperItem = document.createElement("tp-yt-paper-item");
       paperItem.className = "style-scope ytd-menu-service-item-renderer";
+      paperItem.setAttribute("role", "option");
+      paperItem.style.cssText = "display:flex;align-items:center;box-sizing:border-box;min-height:48px;padding:0 16px;visibility:visible;opacity:1;color:inherit;cursor:pointer";
       const icon = document.createElement("yt-icon");
       icon.className = "style-scope ytd-menu-service-item-renderer";
       icon.style.cssText = "margin-right:16px;width:24px;height:24px;display:inline-flex";
@@ -501,7 +506,10 @@
       path.setAttribute("d", "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm5 11H7v-2h10v2Z");
       svg.appendChild(path);
       icon.appendChild(svg);
-      const label = document.createElement("yt-formatted-string");
+      const label = document.createElement("span");
+      label.id = "label";
+      label.className = "style-scope ytd-menu-service-item-renderer";
+      label.style.cssText = "display:block;flex:1;visibility:visible;opacity:1;color:inherit;font:inherit;white-space:nowrap";
       label.textContent = "Hide this channel";
       paperItem.append(icon, label);
       item.appendChild(paperItem);

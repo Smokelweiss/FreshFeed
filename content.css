@@ -2,6 +2,23 @@
   display: none !important;
 }
 
+[data-ff-video-block-channel="1"] #label {
+  display: block !important;
+  flex: 1 1 auto !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  color: inherit !important;
+  font: inherit !important;
+  white-space: nowrap !important;
+}
+
+[data-ff-video-block-channel="1"] > tp-yt-paper-item {
+  display: flex !important;
+  align-items: center !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
 .ff-sync-toast {
   position: fixed;
   right: 16px;
