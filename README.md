@@ -23,9 +23,15 @@ Filtering uses a compiled identity index for channel IDs, `@handles`, and legacy
 - Hide subscribed channels' videos and Shorts on YouTube Home.
 - Automatic first synchronization when YouTube is opened after installation.
 - Immediate updates after Subscribe and Unsubscribe actions.
+- YouTube's native “Not interested” action remains active; FreshFeed also adds the channel to a separate local blacklist after the click.
 - Manual synchronization with progress reporting.
 - No telemetry and no third-party servers.
 - Large local lists use Firefox's unlimited local-storage quota and set-backed lookups rather than scanning every saved channel for every card.
+
+The popup provides independent switches for subscribed-channel filtering, the
+“Not interested” blacklist, Shorts, recommendations, and Subscribe updates.
+Turning a switch off preserves the saved channels and only disables that
+behavior.
 
 The popup lists the active filtering capabilities. If YouTube returns an invalid or expired continuation page during synchronization, FreshFeed skips that page, keeps collecting valid pages, and reports how many pages were unavailable instead of discarding the entire synchronization.
 

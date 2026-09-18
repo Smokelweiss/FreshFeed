@@ -9,22 +9,13 @@
 <body>
   <main>
     <h1>FreshFeed</h1>
-    <label class="switch-row">
-      <span>Enabled</span>
-      <input id="enabled" type="checkbox">
-      <span class="switch" aria-hidden="true"></span>
-    </label>
-    <p id="count">Channels: 0</p>
-    <section class="features" aria-labelledby="features-title">
-      <h2 id="features-title">Features</h2>
-      <ul>
-        <li>Blocks subscribed channels on Home, Shorts, and recommendations.</li>
-        <li>Updates immediately after Subscribe or Unsubscribe.</li>
-        <li>Uses channel ID, @handle, and legacy channel URL matching.</li>
-        <li>Filters YouTube JSON before render when channel identity is available.</li>
-        <li>Uses fast indexed lookups for large local lists.</li>
-      </ul>
-    </section>
+    <h2>Filtering</h2>
+    <label class="switch-row"><span>Hide subscribed channels</span><input id="hide-subscribed" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
+    <label class="switch-row"><span>Hide “Not interested” channels</span><input id="hide-not-interested" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
+    <label class="switch-row"><span>Hide Shorts</span><input id="hide-shorts" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
+    <label class="switch-row"><span>Filter recommendations</span><input id="filter-recommendations" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
+    <label class="switch-row"><span>Update after Subscribe</span><input id="update-subscriptions" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
+    <p id="count">Subscribed: 0 · Blacklisted: 0</p>
     <p id="synced">Last sync: never</p>
     <div id="progress-wrap" hidden>
       <div class="progress-bar"><span></span></div>
@@ -33,7 +24,6 @@
     <p id="result" class="result" hidden></p>
     <button id="sync" type="button">Sync subscriptions</button>
     <button id="clear" class="secondary" type="button">Clear list</button>
-    <p class="hint">New subscriptions are added immediately after clicking YouTube's Subscribe button. Use sync to import existing subscriptions.</p>
   </main>
   <script src="popup.js"></script>
 </body>

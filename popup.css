@@ -110,29 +110,6 @@ button.secondary {
   }
 }
 
-.hint {
-  color: #666;
-  font-size: 12px;
-}
-
-.features {
-  padding: 8px 10px;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  background: #fafafa;
-}
-
-.features ul {
-  margin: 0;
-  padding-left: 18px;
-  color: #444;
-  font-size: 12px;
-}
-
-.features li {
-  margin: 4px 0;
-}
-
 .result {
   color: #137333;
   font-size: 12px;

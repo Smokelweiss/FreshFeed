@@ -1,7 +1,13 @@
 (function () {
   "use strict";
 
-  const enabled = document.getElementById("enabled");
+  const settingControls = {
+    hideSubscribedChannels: document.getElementById("hide-subscribed"),
+    hideNotInterestedChannels: document.getElementById("hide-not-interested"),
+    hideShorts: document.getElementById("hide-shorts"),
+    filterRecommendations: document.getElementById("filter-recommendations"),
+    updateAfterSubscriptionChange: document.getElementById("update-subscriptions")
+  };
   const count = document.getElementById("count");
   const synced = document.getElementById("synced");
   const progressWrap = document.getElementById("progress-wrap");
@@ -17,7 +23,7 @@
   }
 
   function channelCount(channels) {
-    return Math.max((channels.ids || []).length, (channels.handles || []).length, (channels.names || []).length);
+    return (channels.ids || []).length || Math.max((channels.handles || []).length, (channels.customUrls || []).length, (channels.names || []).length);
   }
 
   function render(data) {
@@ -44,8 +50,19 @@
       progress = null;
       data = { ...data, syncPending: false };
     }
-    enabled.checked = data.enabled !== false;
-    count.textContent = "Channels: " + channelCount(channels);
+    const blocked = channelsOf(data.blockedChannels);
+    const settings = {
+      hideSubscribedChannels: true,
+      hideNotInterestedChannels: true,
+      hideShorts: true,
+      filterRecommendations: true,
+      updateAfterSubscriptionChange: true,
+      ...data
+    };
+    Object.entries(settingControls).forEach(([key, control]) => {
+      control.checked = settings[key] !== false;
+    });
+    count.textContent = "Subscribed: " + channelCount(channels) + " · Blacklisted: " + channelCount(blocked);
     synced.textContent = "Last sync: " + (data.syncedAt ? new Date(data.syncedAt).toLocaleString("en-US") : "never");
     progressWrap.hidden = !progress;
     if (progress) {
@@ -61,10 +78,12 @@
   }
 
   async function refresh() {
-    render(await browser.storage.local.get(["enabled", "channels", "syncedAt", "syncProgress", "syncPending", "syncPendingAt", "lastSyncResult"]));
+    render(await browser.storage.local.get(["channels", "blockedChannels", "syncedAt", "syncProgress", "syncPending", "syncPendingAt", "lastSyncResult", ...Object.keys(settingControls)]));
   }
 
-  enabled.addEventListener("change", () => browser.storage.local.set({ enabled: enabled.checked }));
+  Object.entries(settingControls).forEach(([key, control]) => {
+    control.addEventListener("change", () => browser.storage.local.set({ [key]: control.checked }));
+  });
   sync.addEventListener("click", async () => {
     await browser.storage.local.set({ syncPending: true, syncPendingAt: Date.now() });
     const tabs = await browser.tabs.query({ url: "*://www.youtube.com/*" });

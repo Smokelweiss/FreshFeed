@@ -4,9 +4,18 @@
   const CARD_SELECTOR = "ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, ytd-reel-item-renderer";
   const CHANNEL_LINK_SELECTOR = 'a[href^="/@"], a[href^="/channel/"], a[href^="/c/"], a[href^="/user/"]';
   const DEFAULT_CHANNELS = { ids: [], handles: [], customUrls: [], names: [], records: [] };
+  const DEFAULT_SETTINGS = {
+    hideSubscribedChannels: true,
+    hideNotInterestedChannels: true,
+    hideShorts: true,
+    filterRecommendations: true,
+    updateAfterSubscriptionChange: true
+  };
   let state = {
     enabled: true,
     channels: DEFAULT_CHANNELS,
+    blockedChannels: DEFAULT_CHANNELS,
+    settings: DEFAULT_SETTINGS,
     syncedAt: null,
     syncPending: false,
     syncLock: null,
@@ -17,12 +26,17 @@
   let handles = new Set();
   let customUrls = new Set();
   let names = new Set();
+  let blockedIds = new Set();
+  let blockedHandles = new Set();
+  let blockedCustomUrls = new Set();
+  let blockedNames = new Set();
   let homeObserver = null;
   let homeTimer = null;
   let homeActive = false;
   let syncRunning = false;
   let fallbackRunning = false;
   let dynamicTimer = null;
+  let lastMenuContext = null;
 
   function normName(value) {
     return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
@@ -70,12 +84,28 @@
     };
   }
 
+  function normalizeSettings(saved) {
+    const source = saved && typeof saved === "object" ? saved : {};
+    return Object.fromEntries(Object.keys(DEFAULT_SETTINGS).map((key) => {
+      if (Object.prototype.hasOwnProperty.call(source, key)) {
+        return [key, source[key] !== false];
+      }
+      return [key, key === "hideSubscribedChannels" ? source.enabled !== false : DEFAULT_SETTINGS[key]];
+    }));
+  }
+
   function updateSets() {
     state.channels = normalizeChannelState(state.channels);
+    state.blockedChannels = normalizeChannelState(state.blockedChannels);
+    state.settings = normalizeSettings(state.settings);
     ids = new Set(state.channels.ids);
     handles = new Set(state.channels.handles);
     customUrls = new Set(state.channels.customUrls);
     names = new Set(state.channels.names);
+    blockedIds = new Set(state.blockedChannels.ids);
+    blockedHandles = new Set(state.blockedChannels.handles);
+    blockedCustomUrls = new Set(state.blockedChannels.customUrls);
+    blockedNames = new Set(state.blockedChannels.names);
     publishPageFilterIndex();
   }
 
@@ -88,7 +118,14 @@
         handles: state.channels.handles,
         customUrls: state.channels.customUrls,
         names: state.channels.names
-      }
+      },
+      blockedIndex: {
+        ids: state.blockedChannels.ids,
+        handles: state.blockedChannels.handles,
+        customUrls: state.blockedChannels.customUrls,
+        names: state.blockedChannels.names
+      },
+      settings: state.settings
     }, "*");
   }
 
@@ -175,6 +212,35 @@
     return channel.ids.size > 0 || channel.handles.size > 0 || channel.customUrls.size > 0 || channel.names.size > 0;
   }
 
+  function matchesIndex(channel, index) {
+    return Array.from(channel.ids).some((id) => index.ids.has(id)) ||
+      Array.from(channel.handles).some((handle) => index.handles.has(handle)) ||
+      Array.from(channel.customUrls || []).some((customUrl) => index.customUrls.has(customUrl)) ||
+      Array.from(channel.names).some((name) => index.names.has(name));
+  }
+
+  function isHiddenChannel(channel, isShort) {
+    if (isShort && !state.settings.hideShorts) {
+      return false;
+    }
+    if (location.pathname === "/" && !state.settings.filterRecommendations) {
+      return false;
+    }
+    const subscribedMatch = state.settings.hideSubscribedChannels && matchesIndex(channel, {
+      ids,
+      handles,
+      customUrls,
+      names
+    });
+    const blockedMatch = state.settings.hideNotInterestedChannels && matchesIndex(channel, {
+      ids: blockedIds,
+      handles: blockedHandles,
+      customUrls: blockedCustomUrls,
+      names: blockedNames
+    });
+    return subscribedMatch || blockedMatch;
+  }
+
   function isSubscribed(channel) {
     return Array.from(channel.ids).some((id) => ids.has(id)) ||
       Array.from(channel.handles).some((handle) => handles.has(handle)) ||
@@ -195,7 +261,8 @@
     }
     card.setAttribute("data-ff-checked", "1");
     card.setAttribute("data-ff-href", href);
-    if (state.enabled && isSubscribed(channel)) {
+    const isShort = card.matches("ytd-reel-item-renderer, ytd-rich-shelf-renderer, ytd-reel-shelf-renderer");
+    if (state.enabled && isHiddenChannel(channel, isShort)) {
       card.setAttribute("data-ff-hidden", "1");
     } else {
       card.removeAttribute("data-ff-hidden");
@@ -213,7 +280,7 @@
   }
 
   function scanHome() {
-    if (!homeActive || !state.enabled) {
+    if (!homeActive || !state.enabled || !state.settings.filterRecommendations) {
       return;
     }
     document.querySelectorAll(CARD_SELECTOR + ":not([data-ff-checked])").forEach(markCard);
@@ -309,11 +376,15 @@
   }
 
   function mergeChannel(channel, remove) {
+    return mergeChannelCollection(state.channels, channel, remove);
+  }
+
+  function mergeChannelCollection(collection, channel, remove) {
     const next = {
-      ids: new Set(state.channels.ids),
-      handles: new Set(state.channels.handles),
-      customUrls: new Set(state.channels.customUrls),
-      names: new Set(state.channels.names)
+      ids: new Set(collection.ids),
+      handles: new Set(collection.handles),
+      customUrls: new Set(collection.customUrls),
+      names: new Set(collection.names)
     };
     const operation = remove ? "delete" : "add";
     channel.ids.forEach((value) => next.ids[operation](value));
@@ -326,7 +397,83 @@
       customUrls: Array.from(next.customUrls),
       names: Array.from(next.names)
     };
-    return { changed: JSON.stringify(state.channels) !== JSON.stringify(channels), channels };
+    return { changed: JSON.stringify(collection) !== JSON.stringify(channels), channels };
+  }
+
+  async function addBlockedChannel(channel, card) {
+    if (!hasChannelData(channel)) {
+      return;
+    }
+    const result = mergeChannelCollection(state.blockedChannels, channel, false);
+    if (!result.changed) {
+      return;
+    }
+    try {
+      state.blockedChannels = result.channels;
+      updateSets();
+      await browser.storage.local.set({
+        blockedChannels: state.blockedChannels,
+        lastBlockResult: "Added channel to blacklist"
+      });
+      if (card) {
+        card.setAttribute("data-ff-hidden", "1");
+      }
+      scheduleHomeScan();
+    } catch (error) {
+      await browser.storage.local.set({
+        lastBlockResult: "Could not save channel to blacklist: " + ((error && error.message) || "storage error")
+      });
+    }
+  }
+
+  function menuText(element) {
+    return normName(
+      element && (
+        element.getAttribute("aria-label") ||
+        element.getAttribute("title") ||
+        element.textContent
+      )
+    );
+  }
+
+  function isNotInterestedItem(element) {
+    const text = menuText(element);
+    return text === "not interested" ||
+      text === "не интересно" ||
+      text === "не интересует" ||
+      text === "не рекомендовать видео с данного канала" ||
+      text === "не рекомендовать видео с этого канала";
+  }
+
+  function cardForElement(element) {
+    return element && element.closest && element.closest(CARD_SELECTOR);
+  }
+
+  function observeNotInterestedAction(event) {
+    const target = event.target && event.target.closest
+      ? event.target.closest("ytd-menu-service-item-renderer, tp-yt-paper-item, [role='menuitem']")
+      : null;
+    const card = cardForElement(event.target);
+    if (card && event.target.closest && event.target.closest("ytd-menu-button-renderer, ytd-menu-renderer, button[aria-label*='More'], button[aria-label*='more']")) {
+      lastMenuContext = { card, channel: extractChannel(card), at: Date.now() };
+    }
+    if (!target || !isNotInterestedItem(target)) {
+      return;
+    }
+    const cached = lastMenuContext && Date.now() - lastMenuContext.at < 10000 ? lastMenuContext : null;
+    setTimeout(() => {
+      const card = cached && cached.card;
+      const channel = cached && cached.channel;
+      if (channel && hasChannelData(channel)) {
+        addBlockedChannel(channel, card);
+      }
+    }, 0);
+    setTimeout(() => {
+      const card = cached && cached.card;
+      if (card && !hasChannelData(cached.channel)) {
+        addBlockedChannel(extractChannel(card), card);
+      }
+    }, 180);
   }
 
   async function checkDynamicChannel() {
@@ -824,7 +971,7 @@
   }
 
   async function syncFromSubscribeButton(button) {
-    if (!button) {
+    if (!button || !state.settings.updateAfterSubscriptionChange) {
       return;
     }
     let channel = ownerChannel();
@@ -889,6 +1036,24 @@
         scheduleHomeScan();
       }
     }
+    if (changes.blockedChannels) {
+      state.blockedChannels = normalizeChannelState(changes.blockedChannels.newValue);
+      updateSets();
+      if (homeActive) {
+        clearHiddenCards(true);
+        scheduleHomeScan();
+      }
+    }
+    const settingKeys = Object.keys(DEFAULT_SETTINGS);
+    if (settingKeys.some((key) => changes[key])) {
+      state.settings = normalizeSettings({
+        ...state.settings,
+        ...Object.fromEntries(settingKeys.map((key) => [key, changes[key] ? changes[key].newValue : state.settings[key]]))
+      });
+      updateSets();
+      clearHiddenCards(true);
+      updatePageMode();
+    }
     if (changes.syncPending) {
       state.syncPending = Boolean(changes.syncPending.newValue);
       if (state.syncPending) {
@@ -916,6 +1081,8 @@
     const saved = await browser.storage.local.get([
       "enabled",
       "channels",
+      "blockedChannels",
+      ...Object.keys(DEFAULT_SETTINGS),
       "syncedAt",
       "syncPending",
       "syncLock",
@@ -924,8 +1091,10 @@
       "lastSyncResult",
       "initialSyncDone"
     ]);
-    state.enabled = saved.enabled !== false;
+    state.enabled = true;
     state.channels = normalizeChannelState(saved.channels);
+    state.blockedChannels = normalizeChannelState(saved.blockedChannels);
+    state.settings = normalizeSettings(saved);
     state.syncedAt = saved.syncedAt || null;
     state.syncPending = Boolean(saved.syncPending);
     state.syncLock = saved.syncLock || null;
@@ -951,6 +1120,7 @@
       }
       setTimeout(() => syncFromSubscribeButton(button), 120);
     }, true);
+    document.addEventListener("click", observeNotInterestedAction, true);
     updatePageMode();
     if (state.syncFallback && location.pathname === "/feed/channels") {
       startFallbackSync();
