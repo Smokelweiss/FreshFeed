@@ -178,6 +178,9 @@
     if (typeof value.browseId === "string" && /^UC[\w-]+$/i.test(value.browseId)) {
       result.ids.add(value.browseId.toLowerCase());
     }
+    if (typeof value.channelId === "string" && /^UC[\w-]+$/i.test(value.channelId)) {
+      result.ids.add(value.channelId.toLowerCase());
+    }
     if (typeof value.canonicalBaseUrl === "string" && value.canonicalBaseUrl.startsWith("/@")) {
       const parsed = parseChannelHref(value.canonicalBaseUrl);
       if (parsed.handle) {
@@ -192,7 +195,7 @@
 
   function extractChannel(card) {
     const result = { ids: new Set(), handles: new Set(), customUrls: new Set(), names: new Set() };
-    card.querySelectorAll(CHANNEL_LINK_SELECTOR).forEach((link) => {
+    card.querySelectorAll("a[href]").forEach((link) => {
       const parsed = parseChannelHref(link.getAttribute("href"));
       if (parsed.id) {
         result.ids.add(parsed.id);
@@ -204,6 +207,21 @@
         result.customUrls.add(parsed.customUrl);
       }
     });
+    try {
+      const embeddedSources = [
+        card.wrappedJSObject && card.wrappedJSObject.data,
+        card.wrappedJSObject && card.wrappedJSObject.__data,
+        card.data,
+        card.__data
+      ];
+      for (const source of embeddedSources) {
+        if (source && typeof source === "object") {
+          walkEmbeddedData(source, 0, new Set(), result);
+        }
+      }
+    } catch (error) {
+      // Firefox may restrict access to page-owned renderer data.
+    }
     const nameSelectors = [
       "ytd-channel-name #text",
       "#channel-name #text",
@@ -222,13 +240,6 @@
       if (value) {
         result.names.add(value);
         break;
-      }
-    }
-    if (!result.ids.size && !result.handles.size && !result.customUrls.size) {
-      try {
-        walkEmbeddedData(card.wrappedJSObject && card.wrappedJSObject.data, 0, new Set(), result);
-      } catch (error) {
-        // Firefox may restrict access to the wrapped page data.
       }
     }
     if (!result.ids.size && !result.handles.size && !result.customUrls.size && !result.names.size) {
