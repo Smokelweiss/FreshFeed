@@ -10,7 +10,6 @@
   let blockedIndex = { ids: new Set(), handles: new Set(), customUrls: new Set(), names: new Set() };
   let settings = {
     hideSubscribedChannels: true,
-    filterRecommendations: true,
     hidePlayables: false,
     hideMembersOnly: false,
     hideMixRadio: false,
@@ -74,7 +73,6 @@
 
   function channelMatches(node) {
     if (matchesIndex(node, blockedIndex)) return true;
-    if (location.pathname === "/" && !settings.filterRecommendations) return false;
     return settings.hideSubscribedChannels && matchesIndex(node, index);
   }
 
@@ -115,7 +113,6 @@
   }
 
   function contentMatches(node, rendererKey) {
-    if (location.pathname === "/" && !settings.filterRecommendations) return false;
     const text = textOf(node);
     if (settings.hidePlayables && (rendererKey.includes("playable") || text.includes("playables"))) return true;
     if (settings.hideMembersOnly && (text.includes("members-only") || text.includes("members only") || text.includes("members"))) return true;

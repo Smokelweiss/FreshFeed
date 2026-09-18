@@ -29,7 +29,7 @@ Filtering uses a compiled identity index for channel IDs, `@handles`, and legacy
 - Large local lists use Firefox's unlimited local-storage quota and set-backed lookups rather than scanning every saved channel for every card.
 
 The popup provides independent switches for subscribed-channel filtering,
-Shorts, recommendations, and Subscribe updates. Channels added through
+Shorts, content filters, and Subscribe updates. Channels added through
 YouTube's **Not recommend this channel** action are always hidden by FreshFeed;
 that behavior is intentionally not optional. Turning another switch off
 preserves its saved data and only disables that behavior.

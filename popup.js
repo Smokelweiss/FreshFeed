@@ -4,7 +4,6 @@
   const settingControls = {
     hideSubscribedChannels: document.getElementById("hide-subscribed"),
     hideShorts: document.getElementById("hide-shorts"),
-    filterRecommendations: document.getElementById("filter-recommendations"),
     updateAfterSubscriptionChange: document.getElementById("update-subscriptions"),
     hidePlayables: document.getElementById("hide-playables"),
     hideMembersOnly: document.getElementById("hide-members-only"),
@@ -62,7 +61,6 @@
     const settings = {
       hideSubscribedChannels: true,
       hideShorts: true,
-      filterRecommendations: true,
       updateAfterSubscriptionChange: true,
       hidePlayables: false,
       hideMembersOnly: false,

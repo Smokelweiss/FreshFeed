@@ -32,7 +32,6 @@ The global `enabled` switch will be replaced by independent settings:
 
 - `hideSubscribedChannels`
 - `hideShorts`
-- `filterRecommendations`
 - `updateAfterSubscriptionChange`
 
 The remaining settings default to enabled for backward-compatible behavior.

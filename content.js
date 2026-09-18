@@ -7,7 +7,6 @@
   const DEFAULT_SETTINGS = {
     hideSubscribedChannels: true,
     hideShorts: true,
-    filterRecommendations: true,
     updateAfterSubscriptionChange: true,
     hidePlayables: false,
     hideMembersOnly: false,
@@ -287,9 +286,6 @@
     }
 
     function shouldHideByContent(card) {
-      if (location.pathname === "/" && !state.settings.filterRecommendations) {
-        return false;
-      }
       const flags = cardContentFlags(card);
       if (flags.isPlayable && state.settings.hidePlayables) return true;
       if (flags.isMembersOnly && state.settings.hideMembersOnly) return true;
@@ -346,7 +342,7 @@
   }
 
   function scanHome() {
-    if (!homeActive || !state.enabled || !state.settings.filterRecommendations) {
+    if (!homeActive || !state.enabled) {
       return;
     }
     document.querySelectorAll(CARD_SELECTOR + ":not([data-ff-checked])").forEach(markCard);

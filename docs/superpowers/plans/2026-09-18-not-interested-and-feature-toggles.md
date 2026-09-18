@@ -28,7 +28,7 @@
 
 **Interfaces:**
 - Consumes: existing `channels`, `enabled`, `updateSets()`, `markCard()`, and popup storage rendering.
-- Produces: `blockedChannels`, `hideSubscribedChannels`, `hideShorts`, `filterRecommendations`, and `updateAfterSubscriptionChange` storage keys; separate blocked/subscribed indexes used by filtering. The blocked index is always enforced.
+- Produces: `blockedChannels`, `hideSubscribedChannels`, `hideShorts`, and `updateAfterSubscriptionChange` storage keys; separate blocked/subscribed indexes used by filtering. The blocked index is always enforced.
 
 - [x] **Step 1: Define defaults and normalized blocked state**
 
@@ -38,7 +38,6 @@ Add a `DEFAULT_SETTINGS` object and normalize `blockedChannels` through the same
 const DEFAULT_SETTINGS = {
   hideSubscribedChannels: true,
   hideShorts: true,
-  filterRecommendations: true,
   updateAfterSubscriptionChange: true
 };
 ```
@@ -51,7 +50,7 @@ Maintain `blockedIds`, `blockedHandles`, `blockedCustomUrls`, and `blockedNames`
 
 - [x] **Step 3: Gate surfaces without deleting data**
 
-Use `hideShorts` to skip `ytd-reel-item-renderer` handling, and use `filterRecommendations` to gate recommendation/home scanning while preserving the subscription source. Do not clear hidden cards when a setting is disabled without first removing only the corresponding data attribute.
+Use `hideShorts` to skip `ytd-reel-item-renderer` handling. Each remaining content switch controls only its own filter; there is no master switch for the recommendation feed. Do not clear hidden cards when a setting is disabled without first removing only the corresponding data attribute.
 
 - [x] **Step 4: Add migration reads**
 
@@ -151,7 +150,6 @@ Render the labeled switch rows with stable IDs:
 ```html
 <input id="hide-subscribed" type="checkbox">
 <input id="hide-shorts" type="checkbox">
-<input id="filter-recommendations" type="checkbox">
 <input id="update-subscriptions" type="checkbox">
 ```
 
