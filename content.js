@@ -484,12 +484,12 @@
       const item = document.createElement("tp-yt-paper-item");
       item.setAttribute("data-ff-video-block-channel", "1");
       item.setAttribute("role", "menuitem");
-      item.setAttribute("aria-label", "Hide this channel");
+      item.setAttribute("aria-label", "Blacklist channel");
       const isWatchMenu = location.pathname.startsWith("/watch");
       if (isWatchMenu) {
         item.setAttribute("data-ff-watch-menu", "1");
       }
-      item.style.cssText = "display:flex;align-items:center;box-sizing:border-box;min-height:48px;padding:0 16px;visibility:visible;opacity:1;color:inherit;cursor:pointer";
+      item.style.cssText = "display:flex;align-items:center;box-sizing:border-box;width:100%;max-width:100%;min-width:0;min-height:48px;padding:0 16px;visibility:visible;opacity:1;color:inherit;cursor:pointer;overflow:hidden";
       const icon = document.createElement("span");
       icon.setAttribute("aria-hidden", "true");
       icon.style.cssText = "margin-right:16px;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;color:inherit";
@@ -506,8 +506,8 @@
       icon.appendChild(svg);
       const label = document.createElement("span");
       label.id = "label";
-      label.style.cssText = "display:block;flex:1;visibility:visible;opacity:1;color:inherit;font:inherit;white-space:nowrap";
-      label.textContent = "Hide this channel";
+      label.style.cssText = "display:block;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;visibility:visible;opacity:1;color:inherit;font:inherit;white-space:nowrap";
+      label.textContent = "Blacklist channel";
       item.append(icon, label);
       item.addEventListener("click", () => {
         addBlockedChannel(channel, card);
