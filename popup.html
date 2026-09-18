@@ -14,7 +14,17 @@
     <label class="switch-row"><span>Hide Members-only videos</span><input id="hide-members-only" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
     <label class="switch-row"><span>Hide Mix / Radio playlists</span><input id="hide-mix-radio" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
     <label class="switch-row"><span>Upload date filter</span><input id="filter-upload-date" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
+    <div id="upload-date-options" class="filter-options" hidden>
+      <label>Mode <select id="upload-date-mode"><option value="onlyPast">Only past</option><option value="olderThan">Block older than</option><option value="between">Between</option></select></label>
+      <label>Value <input id="upload-date-value" class="inline-number" type="number" min="1" max="3650" step="1"><select id="upload-date-unit"><option value="days">days</option><option value="weeks">weeks</option><option value="months">months</option><option value="years">years</option></select></label>
+      <label id="upload-date-between" hidden>From <input id="upload-date-min" class="inline-number" type="number" min="1" max="3650" step="1"> to <input id="upload-date-max" class="inline-number" type="number" min="1" max="3650" step="1"> <span class="unit-label">days</span></label>
+    </div>
     <label class="switch-row"><span>Duration Filter</span><input id="filter-duration" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
+    <div id="duration-options" class="filter-options" hidden>
+      <label>Mode <select id="duration-mode"><option value="onlyShorter">Only shorter than</option><option value="longerThan">Block longer than</option><option value="between">Between</option></select></label>
+      <label>Value <input id="duration-value" class="inline-number" type="number" min="1" max="100000" step="1"><select id="duration-unit"><option value="seconds">seconds</option><option value="minutes">minutes</option><option value="hours">hours</option><option value="days">days</option></select></label>
+      <label id="duration-between" hidden>From <input id="duration-min" class="inline-number" type="number" min="1" max="100000" step="1"> to <input id="duration-max" class="inline-number" type="number" min="1" max="100000" step="1"> <span class="duration-unit-label">minutes</span></label>
+    </div>
     <p id="error" class="error" hidden></p>
     <button id="settings" class="secondary" type="button">Extension settings</button>
   </main>

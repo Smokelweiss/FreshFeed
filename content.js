@@ -1,8 +1,8 @@
 (function () {
   "use strict";
 
-  const CARD_SELECTOR = "ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, ytd-reel-item-renderer";
-  const CHANNEL_LINK_SELECTOR = 'a[href^="/@"], a[href^="/channel/"], a[href^="/c/"], a[href^="/user/"]';
+  const CARD_SELECTOR = "ytd-rich-item-renderer, ytd-rich-grid-media, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, ytd-rich-shelf-renderer, ytd-reel-item-renderer";
+  const CHANNEL_LINK_SELECTOR = 'a[href*="/@"], a[href*="/channel/"], a[href*="/c/"], a[href*="/user/"]';
   const DEFAULT_CHANNELS = { ids: [], handles: [], customUrls: [], names: [], records: [] };
   const DEFAULT_SETTINGS = {
     hideSubscribedChannels: true,
@@ -209,6 +209,9 @@
       "#channel-name #text",
       "#channel-name a",
       "ytd-channel-name a",
+      "yt-lockup-metadata-view-model a",
+      "yt-lockup-metadata-view-model yt-formatted-string",
+      "ytd-video-meta-block #byline",
       "yt-formatted-string#text.ytd-channel-name",
       "yt-content-metadata-view-model .yt-content-metadata-view-model__metadata-text",
       "yt-content-metadata-view-model .yt-core-attributed-string"
@@ -221,12 +224,16 @@
         break;
       }
     }
-    if (!result.ids.size && !result.handles.size) {
+    if (!result.ids.size && !result.handles.size && !result.customUrls.size) {
       try {
         walkEmbeddedData(card.wrappedJSObject && card.wrappedJSObject.data, 0, new Set(), result);
       } catch (error) {
         // Firefox may restrict access to the wrapped page data.
       }
+    }
+    if (!result.ids.size && !result.handles.size && !result.customUrls.size && !result.names.size) {
+      const fallbackName = normName(card.querySelector("#byline, #channel-name, ytd-channel-name, yt-lockup-metadata-view-model")?.textContent);
+      if (fallbackName) result.names.add(fallbackName);
     }
     return result;
   }
@@ -392,6 +399,12 @@
     if (!homeActive || !state.enabled) {
       return;
     }
+
+    function isFilterSurface() {
+      return location.pathname === "/" ||
+        location.pathname.startsWith("/feed/") ||
+        location.pathname.startsWith("/results");
+    }
     document.querySelectorAll(CARD_SELECTOR + ":not([data-ff-checked])").forEach(markCard);
     document.querySelectorAll(CARD_SELECTOR + "[data-ff-checked='1']").forEach((card) => {
       const href = firstVideoHref(card);
@@ -422,7 +435,7 @@
   }
 
   function connectHome() {
-    if (location.pathname !== "/" || !state.enabled) {
+    if (!isFilterSurface() || !state.enabled) {
       disconnectHome();
       return;
     }
@@ -435,7 +448,7 @@
   }
 
   function updatePageMode() {
-    if (location.pathname === "/") {
+    if (isFilterSurface()) {
       connectHome();
     } else {
       disconnectHome();

@@ -205,16 +205,16 @@
     const data = event.data;
     if (!data || data.source !== "freshfeed-content" || data.type !== "index") return;
     index = {
-      ids: new Set(Array.isArray(data.index?.ids) ? data.index.ids : []),
-      handles: new Set(Array.isArray(data.index?.handles) ? data.index.handles : []),
-      customUrls: new Set(Array.isArray(data.index?.customUrls) ? data.index.customUrls : []),
-      names: new Set(Array.isArray(data.index?.names) ? data.index.names : [])
+      ids: new Set(Array.isArray(data.index?.ids) ? data.index.ids.map((value) => String(value).toLowerCase()) : []),
+      handles: new Set(Array.isArray(data.index?.handles) ? data.index.handles.map((value) => String(value).toLowerCase()) : []),
+      customUrls: new Set(Array.isArray(data.index?.customUrls) ? data.index.customUrls.map((value) => String(value).toLowerCase()) : []),
+      names: new Set(Array.isArray(data.index?.names) ? data.index.names.map(normalize) : [])
     };
     blockedIndex = {
-      ids: new Set(Array.isArray(data.blockedIndex?.ids) ? data.blockedIndex.ids : []),
-      handles: new Set(Array.isArray(data.blockedIndex?.handles) ? data.blockedIndex.handles : []),
-      customUrls: new Set(Array.isArray(data.blockedIndex?.customUrls) ? data.blockedIndex.customUrls : []),
-      names: new Set(Array.isArray(data.blockedIndex?.names) ? data.blockedIndex.names : [])
+      ids: new Set(Array.isArray(data.blockedIndex?.ids) ? data.blockedIndex.ids.map((value) => String(value).toLowerCase()) : []),
+      handles: new Set(Array.isArray(data.blockedIndex?.handles) ? data.blockedIndex.handles.map((value) => String(value).toLowerCase()) : []),
+      customUrls: new Set(Array.isArray(data.blockedIndex?.customUrls) ? data.blockedIndex.customUrls.map((value) => String(value).toLowerCase()) : []),
+      names: new Set(Array.isArray(data.blockedIndex?.names) ? data.blockedIndex.names.map(normalize) : [])
     };
     settings = { ...settings, ...(data.settings || {}) };
   }
