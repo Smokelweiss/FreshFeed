@@ -507,7 +507,7 @@
       const label = document.createElement("span");
       label.id = "label";
       label.style.cssText = "display:block;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;visibility:visible;opacity:1;color:inherit;font:inherit;white-space:nowrap";
-      label.textContent = "Blacklist channel";
+      label.textContent = "Blacklist";
       item.append(icon, label);
       item.addEventListener("click", () => {
         addBlockedChannel(channel, card);
@@ -554,18 +554,20 @@
 
     function expandInjectedMenu(menu) {
       if (menu.closest(".ytp-panel-menu, .ytp-settings-menu")) return;
-      const popup = menu.closest("ytd-menu-popup-renderer");
-      if (!popup) return;
-      popup.style.maxHeight = "none";
-      popup.style.height = "auto";
-      popup.style.overflow = "hidden";
-      popup.style.overflowX = "hidden";
-      popup.style.overflowY = "hidden";
-      menu.style.maxHeight = "none";
-      menu.style.height = "auto";
-      menu.style.overflow = "hidden";
-      menu.style.overflowX = "hidden";
-      menu.style.overflowY = "hidden";
+      const containers = [
+        menu,
+        menu.closest("ytd-menu-popup-renderer"),
+        menu.closest("yt-sheet-view-model"),
+        menu.closest("yt-contextual-sheet-layout"),
+        menu.closest("tp-yt-iron-dropdown")
+      ].filter(Boolean);
+      containers.forEach((container) => {
+        container.style.maxHeight = "none";
+        container.style.height = "auto";
+        container.style.overflow = "hidden";
+        container.style.overflowX = "hidden";
+        container.style.overflowY = "hidden";
+      });
     }
 
     function findOpenFeedCardContext() {
