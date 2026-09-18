@@ -6,7 +6,9 @@
     hideShorts: document.getElementById("hide-shorts"),
     hidePlayables: document.getElementById("hide-playables"),
     hideMembersOnly: document.getElementById("hide-members-only"),
-    hideMixRadio: document.getElementById("hide-mix-radio")
+    hideMixRadio: document.getElementById("hide-mix-radio"),
+    filterUploadDate: document.getElementById("filter-upload-date"),
+    filterDuration: document.getElementById("filter-duration")
   };
   const error = document.getElementById("error");
   const settingsButton = document.getElementById("settings");
