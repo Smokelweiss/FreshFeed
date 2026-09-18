@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FreshFeed",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "description": "Hides YouTube videos and Shorts from channels you are subscribed to.",
   "permissions": [
     "storage",
