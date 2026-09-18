@@ -395,15 +395,15 @@
     }
   }
 
+  function isFilterSurface() {
+    return location.pathname === "/" ||
+      location.pathname.startsWith("/feed/") ||
+      location.pathname.startsWith("/results");
+  }
+
   function scanHome() {
     if (!homeActive || !state.enabled) {
       return;
-    }
-
-    function isFilterSurface() {
-      return location.pathname === "/" ||
-        location.pathname.startsWith("/feed/") ||
-        location.pathname.startsWith("/results");
     }
     document.querySelectorAll(CARD_SELECTOR + ":not([data-ff-checked])").forEach(markCard);
     document.querySelectorAll(CARD_SELECTOR + "[data-ff-checked='1']").forEach((card) => {
