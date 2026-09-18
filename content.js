@@ -260,6 +260,92 @@
       Array.from(channel.names).some((name) => index.names.has(name));
   }
 
+  function parseDurationSeconds(value) {
+    const parts = String(value || "").trim().split(":").map(Number);
+    if (!parts.length || parts.some((part) => !Number.isFinite(part))) return null;
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    return parts.length === 1 ? parts[0] : null;
+  }
+
+  function ageInDays(value) {
+    const match = String(value || "").toLowerCase().match(/(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago/);
+    if (!match) return null;
+    const amount = Number(match[1]);
+    const unit = match[2];
+    const multipliers = {
+      second: 1 / 86400,
+      minute: 1 / 1440,
+      hour: 1 / 24,
+      day: 1,
+      week: 7,
+      month: 30,
+      year: 365
+    };
+    return amount * multipliers[unit];
+  }
+
+  function cardContentFlags(card) {
+    const text = normName(card && card.textContent);
+    const aria = normName(card && (card.getAttribute("aria-label") || ""));
+    const durationElement = card && card.querySelector(
+      "ytd-thumbnail-overlay-time-status-renderer #text, " +
+      "ytd-thumbnail-overlay-time-status-renderer span, " +
+      ".badge-shape-wiz__text"
+    );
+    const durationSeconds = parseDurationSeconds(durationElement && durationElement.textContent);
+    const metadata = card && card.querySelector("#metadata-line, ytd-video-meta-block, .ytd-video-meta-block");
+    const daysOld = ageInDays(metadata && metadata.textContent);
+    return {
+      isPlayable: text.includes("playables") || aria.includes("playables") || card.matches("ytd-rich-shelf-renderer[is-playlist], ytd-playlist-renderer"),
+      isMembersOnly: text.includes("members-only") || text.includes("members only") || Boolean(card.querySelector(".badge-style-type-members-only, ytd-badge-supported-renderer")),
+      isMixRadio: card.matches("ytd-radio-renderer, ytd-compact-radio-renderer, ytd-playlist-renderer, ytd-compact-playlist-renderer") ||
+        text.includes(" mix") || text.startsWith("mix ") || text.includes("radio"),
+      durationSeconds,
+      daysOld
+    };
+  }
+
+  function dateUnitDays(unit) {
+    return { days: 1, weeks: 7, months: 30, years: 365 }[unit] || 1;
+  }
+
+  function durationUnitSeconds(unit) {
+    return { seconds: 1, minutes: 60, hours: 3600, days: 86400 }[unit] || 60;
+  }
+
+  function dateFilterMatches(daysOld) {
+    const unitDays = dateUnitDays(state.settings.uploadDateUnit);
+    const value = Number(state.settings.uploadDateValue) * unitDays;
+    if (state.settings.uploadDateMode === "between") {
+      const min = Number(state.settings.uploadDateMin) * unitDays;
+      const max = Number(state.settings.uploadDateMax) * unitDays;
+      return daysOld < Math.min(min, max) || daysOld > Math.max(min, max);
+    }
+    return daysOld > value;
+  }
+
+  function durationFilterMatches(seconds) {
+    const unitSeconds = durationUnitSeconds(state.settings.durationUnit);
+    const value = Number(state.settings.durationValue) * unitSeconds;
+    if (state.settings.durationMode === "between") {
+      const min = Number(state.settings.durationMin) * unitSeconds;
+      const max = Number(state.settings.durationMax) * unitSeconds;
+      return seconds < Math.min(min, max) || seconds > Math.max(min, max);
+    }
+    return seconds > value;
+  }
+
+  function shouldHideByContent(card) {
+    const flags = cardContentFlags(card);
+    if (flags.isPlayable && state.settings.hidePlayables) return true;
+    if (flags.isMembersOnly && state.settings.hideMembersOnly) return true;
+    if (flags.isMixRadio && state.settings.hideMixRadio) return true;
+    if (state.settings.filterUploadDate && flags.daysOld !== null && dateFilterMatches(flags.daysOld)) return true;
+    if (state.settings.filterDuration && flags.durationSeconds !== null && durationFilterMatches(flags.durationSeconds)) return true;
+    return false;
+  }
+
   function isHiddenChannel(channel, isShort) {
     const blockedMatch = matchesIndex(channel, {
       ids: blockedIds,
@@ -271,92 +357,6 @@
       return true;
     }
     if (isShort && !state.settings.hideShorts) {
-      return false;
-    }
-
-    function parseDurationSeconds(value) {
-      const parts = String(value || "").trim().split(":").map(Number);
-      if (!parts.length || parts.some((part) => !Number.isFinite(part))) return null;
-      if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-      if (parts.length === 2) return parts[0] * 60 + parts[1];
-      return parts.length === 1 ? parts[0] : null;
-    }
-
-    function ageInDays(value) {
-      const match = String(value || "").toLowerCase().match(/(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago/);
-      if (!match) return null;
-      const amount = Number(match[1]);
-      const unit = match[2];
-      const multipliers = {
-        second: 1 / 86400,
-        minute: 1 / 1440,
-        hour: 1 / 24,
-        day: 1,
-        week: 7,
-        month: 30,
-        year: 365
-      };
-      return amount * multipliers[unit];
-    }
-
-    function cardContentFlags(card) {
-      const text = normName(card && card.textContent);
-      const aria = normName(card && (card.getAttribute("aria-label") || ""));
-      const durationElement = card && card.querySelector(
-        "ytd-thumbnail-overlay-time-status-renderer #text, " +
-        "ytd-thumbnail-overlay-time-status-renderer span, " +
-        ".badge-shape-wiz__text"
-      );
-      const durationSeconds = parseDurationSeconds(durationElement && durationElement.textContent);
-      const metadata = card && card.querySelector("#metadata-line, ytd-video-meta-block, .ytd-video-meta-block");
-      const daysOld = ageInDays(metadata && metadata.textContent);
-      return {
-        isPlayable: text.includes("playables") || aria.includes("playables") || card.matches("ytd-rich-shelf-renderer[is-playlist], ytd-playlist-renderer"),
-        isMembersOnly: text.includes("members-only") || text.includes("members only") || Boolean(card.querySelector(".badge-style-type-members-only, ytd-badge-supported-renderer")),
-        isMixRadio: card.matches("ytd-radio-renderer, ytd-compact-radio-renderer, ytd-playlist-renderer, ytd-compact-playlist-renderer") ||
-          text.includes(" mix") || text.startsWith("mix ") || text.includes("radio"),
-        durationSeconds,
-        daysOld
-      };
-    }
-
-    function dateUnitDays(unit) {
-      return { days: 1, weeks: 7, months: 30, years: 365 }[unit] || 1;
-    }
-
-    function durationUnitSeconds(unit) {
-      return { seconds: 1, minutes: 60, hours: 3600, days: 86400 }[unit] || 60;
-    }
-
-    function dateFilterMatches(daysOld) {
-      const unitDays = dateUnitDays(state.settings.uploadDateUnit);
-      const value = Number(state.settings.uploadDateValue) * unitDays;
-      if (state.settings.uploadDateMode === "between") {
-        const min = Number(state.settings.uploadDateMin) * unitDays;
-        const max = Number(state.settings.uploadDateMax) * unitDays;
-        return daysOld < Math.min(min, max) || daysOld > Math.max(min, max);
-      }
-      return daysOld > value;
-    }
-
-    function durationFilterMatches(seconds) {
-      const unitSeconds = durationUnitSeconds(state.settings.durationUnit);
-      const value = Number(state.settings.durationValue) * unitSeconds;
-      if (state.settings.durationMode === "between") {
-        const min = Number(state.settings.durationMin) * unitSeconds;
-        const max = Number(state.settings.durationMax) * unitSeconds;
-        return seconds < Math.min(min, max) || seconds > Math.max(min, max);
-      }
-      return seconds > value;
-    }
-
-    function shouldHideByContent(card) {
-      const flags = cardContentFlags(card);
-      if (flags.isPlayable && state.settings.hidePlayables) return true;
-      if (flags.isMembersOnly && state.settings.hideMembersOnly) return true;
-      if (flags.isMixRadio && state.settings.hideMixRadio) return true;
-      if (state.settings.filterUploadDate && flags.daysOld !== null && dateFilterMatches(flags.daysOld)) return true;
-      if (state.settings.filterDuration && flags.durationSeconds !== null && durationFilterMatches(flags.durationSeconds)) return true;
       return false;
     }
     const subscribedMatch = state.settings.hideSubscribedChannels && matchesIndex(channel, {
