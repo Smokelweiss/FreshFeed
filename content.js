@@ -485,20 +485,25 @@
       item.setAttribute("data-ff-video-block-channel", "1");
       item.setAttribute("role", "menuitem");
       item.setAttribute("aria-label", "Hide this channel");
+      const isWatchMenu = location.pathname.startsWith("/watch");
+      if (isWatchMenu) {
+        item.setAttribute("data-ff-watch-menu", "1");
+      }
       item.className = "style-scope ytd-menu-popup-renderer";
       item.style.cssText = "display:block;visibility:visible;opacity:1";
       const paperItem = document.createElement("tp-yt-paper-item");
       paperItem.className = "style-scope ytd-menu-service-item-renderer";
       paperItem.setAttribute("role", "option");
       paperItem.style.cssText = "display:flex;align-items:center;box-sizing:border-box;min-height:48px;padding:0 16px;visibility:visible;opacity:1;color:inherit;cursor:pointer";
-      const icon = document.createElement("yt-icon");
-      icon.className = "style-scope ytd-menu-service-item-renderer";
-      icon.style.cssText = "margin-right:16px;width:24px;height:24px;display:inline-flex;color:inherit";
+      const icon = document.createElement("span");
+      icon.setAttribute("aria-hidden", "true");
+      icon.style.cssText = "margin-right:16px;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;color:inherit";
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       svg.setAttribute("viewBox", "0 0 24 24");
       svg.setAttribute("width", "24");
       svg.setAttribute("height", "24");
       svg.setAttribute("aria-hidden", "true");
+      svg.style.cssText = "display:block;width:24px;height:24px;fill:currentColor";
       const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
       path.setAttribute("fill", "currentColor");
       path.setAttribute("d", "M5 3a1 1 0 0 1 1-1h12a1 1 0 0 1 .8 1.6L15.25 8l3.55 4.4A1 1 0 0 1 18 14H7v7H5V3Zm2 2v7h8.9l-2.75-3.4a1 1 0 0 1 0-1.2L15.9 5H7Z");

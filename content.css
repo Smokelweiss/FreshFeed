@@ -20,6 +20,19 @@
   color: inherit !important;
 }
 
+[data-ff-video-block-channel="1"][data-ff-watch-menu],
+[data-ff-video-block-channel="1"][data-ff-watch-menu] > tp-yt-paper-item,
+[data-ff-video-block-channel="1"][data-ff-watch-menu] #label {
+  color: var(--yt-spec-text-primary, #fff) !important;
+}
+
+[data-ff-video-block-channel="1"] svg {
+  display: block !important;
+  width: 24px !important;
+  height: 24px !important;
+  fill: currentColor !important;
+}
+
 .ff-sync-toast {
   position: fixed;
   right: 16px;
