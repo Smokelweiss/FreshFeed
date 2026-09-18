@@ -582,7 +582,8 @@
       headers.Authorization = authorization;
     }
     let round = 0;
-    onProgress({ count: result.channels.size, round });
+    let skippedPages = 0;
+    onProgress({ count: result.channels.size, round, skippedPages });
     while (result.tokens.size && round < 200) {
       const token = result.tokens.values().next().value;
       result.tokens.delete(token);
@@ -600,10 +601,20 @@
         10000
       );
       if (!continuationResponse.ok) {
-        throw new Error(continuationResponse.status === 401 || continuationResponse.status === 403 ? "authentication required" : "subscription request failed");
+        skippedPages += 1;
+        onProgress({ count: result.channels.size, round, skippedPages });
+        continue;
+      }
+      let pageData;
+      try {
+        pageData = await continuationResponse.json();
+      } catch (error) {
+        skippedPages += 1;
+        onProgress({ count: result.channels.size, round, skippedPages });
+        continue;
       }
       const page = { channels: new Map(), tokens: new Set() };
-      collectSubscriptionData(await continuationResponse.json(), page, 0);
+      collectSubscriptionData(pageData, page, 0);
       page.channels.forEach((channel, id) => {
         if (!result.channels.has(id) || (!result.channels.get(id).handle && channel.handle)) {
           result.channels.set(id, channel);
@@ -611,7 +622,7 @@
       });
       page.tokens.forEach((pageToken) => result.tokens.add(pageToken));
       round += 1;
-      onProgress({ count: result.channels.size, round });
+      onProgress({ count: result.channels.size, round, skippedPages });
     }
     const channels = { ids: [], handles: [], customUrls: [], names: [] };
     result.channels.forEach((channel) => {
@@ -629,7 +640,10 @@
     if (!channels.ids.length) {
       throw new Error("no subscriptions found");
     }
-    return normalizeChannelState(channels);
+    return {
+    ...normalizeChannelState(channels),
+    skippedPages
+    };
   }
 
   async function runPrimarySync(userInitiated) {
@@ -641,10 +655,11 @@
     const report = createProgressWriter("fetch", startedAt);
     await browser.storage.local.set({ syncProgress: { count: 0, phase: "fetch", startedAt } });
     try {
-      const channels = await fetchSubscriptions(({ count, round }) => {
+      const channels = await fetchSubscriptions(({ count, round, skippedPages }) => {
         report(count, round);
         if (userInitiated) {
-          overlayProgress(count, startedAt, "fetch");
+          const suffix = skippedPages ? " (" + skippedPages + " unavailable pages skipped)" : "";
+          overlayProgress(count, startedAt, "fetch" + suffix);
         }
       });
       await report.finish();
@@ -656,7 +671,8 @@
       state.syncFallback = false;
       state.syncProgress = null;
       updateSets();
-      const result = "Synchronized " + total + " channels (" + Math.floor((syncedAt - startedAt) / 1000) + "s)";
+      const warning = channels.skippedPages ? " (" + channels.skippedPages + " unavailable pages skipped)" : "";
+      const result = "Synchronized " + total + " channels in " + Math.floor((syncedAt - startedAt) / 1000) + "s" + warning;
       await browser.storage.local.set({
         channels,
         syncedAt,

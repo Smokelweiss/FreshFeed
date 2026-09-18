@@ -27,6 +27,8 @@ Filtering uses a compiled identity index for channel IDs, `@handles`, and legacy
 - No telemetry and no third-party servers.
 - Large local lists use Firefox's unlimited local-storage quota and set-backed lookups rather than scanning every saved channel for every card.
 
+The popup lists the active filtering capabilities. If YouTube returns an invalid or expired continuation page during synchronization, FreshFeed skips that page, keeps collecting valid pages, and reports how many pages were unavailable instead of discarding the entire synchronization.
+
 ## Requirements
 
 - Firefox 140 or newer.
