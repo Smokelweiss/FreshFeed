@@ -31,14 +31,15 @@ available, the channel is not silently guessed from arbitrary text.
 The global `enabled` switch will be replaced by independent settings:
 
 - `hideSubscribedChannels`
-- `hideNotInterestedChannels`
 - `hideShorts`
 - `filterRecommendations`
 - `updateAfterSubscriptionChange`
 
-All settings default to enabled for backward-compatible behavior. Disabling a
-setting affects filtering behavior only; it does not delete stored channel
-data.
+The remaining settings default to enabled for backward-compatible behavior.
+Channels captured through YouTube's channel-level “Not interested” action are
+always filtered from FreshFeed; that behavior has no user-facing switch.
+Disabling another setting affects filtering behavior only; it does not delete
+stored channel data.
 
 ### Popup
 

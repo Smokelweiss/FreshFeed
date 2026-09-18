@@ -28,10 +28,11 @@ Filtering uses a compiled identity index for channel IDs, `@handles`, and legacy
 - No telemetry and no third-party servers.
 - Large local lists use Firefox's unlimited local-storage quota and set-backed lookups rather than scanning every saved channel for every card.
 
-The popup provides independent switches for subscribed-channel filtering, the
-“Not interested” blacklist, Shorts, recommendations, and Subscribe updates.
-Turning a switch off preserves the saved channels and only disables that
-behavior.
+The popup provides independent switches for subscribed-channel filtering,
+Shorts, recommendations, and Subscribe updates. Channels added through
+YouTube's **Not recommend this channel** action are always hidden by FreshFeed;
+that behavior is intentionally not optional. Turning another switch off
+preserves its saved data and only disables that behavior.
 
 Additional optional filters are available for YouTube Playables, Members-only
 videos, Mix/Radio playlists, upload age, and maximum video duration. On a

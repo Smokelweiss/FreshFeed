@@ -28,7 +28,7 @@
 
 **Interfaces:**
 - Consumes: existing `channels`, `enabled`, `updateSets()`, `markCard()`, and popup storage rendering.
-- Produces: `blockedChannels`, `hideSubscribedChannels`, `hideNotInterestedChannels`, `hideShorts`, `filterRecommendations`, and `updateAfterSubscriptionChange` storage keys; separate blocked/subscribed indexes used by filtering.
+- Produces: `blockedChannels`, `hideSubscribedChannels`, `hideShorts`, `filterRecommendations`, and `updateAfterSubscriptionChange` storage keys; separate blocked/subscribed indexes used by filtering. The blocked index is always enforced.
 
 - [x] **Step 1: Define defaults and normalized blocked state**
 
@@ -37,7 +37,6 @@ Add a `DEFAULT_SETTINGS` object and normalize `blockedChannels` through the same
 ```js
 const DEFAULT_SETTINGS = {
   hideSubscribedChannels: true,
-  hideNotInterestedChannels: true,
   hideShorts: true,
   filterRecommendations: true,
   updateAfterSubscriptionChange: true
@@ -119,7 +118,9 @@ After successful persistence, mark the current card hidden and schedule a home s
 
 - [x] **Step 5: Add a page-filter index for blocked channels**
 
-Publish both subscribed and blocked indexes to `page-filter.js`. Apply blocked matching only when `hideNotInterestedChannels` is true. Keep the native page response untouched when that setting is disabled.
+Publish both subscribed and blocked indexes to `page-filter.js`. Apply blocked
+matching unconditionally after a channel is added through YouTube's
+channel-level “Not interested” action.
 
 - [x] **Step 6: Run syntax checks**
 
@@ -141,15 +142,14 @@ git commit -m "feat: add native Not interested channels to blacklist"
 
 **Interfaces:**
 - Consumes: feature keys and sync state from Task 1.
-- Produces: compact popup with five independent switches and no feature-list or hint clutter.
+- Produces: compact popup with independent switches and no feature-list or hint clutter.
 
 - [x] **Step 1: Replace the global Enabled row**
 
-Render five labeled switch rows with stable IDs:
+Render the labeled switch rows with stable IDs:
 
 ```html
 <input id="hide-subscribed" type="checkbox">
-<input id="hide-not-interested" type="checkbox">
 <input id="hide-shorts" type="checkbox">
 <input id="filter-recommendations" type="checkbox">
 <input id="update-subscriptions" type="checkbox">
@@ -161,7 +161,10 @@ Delete the `Features` section and the long subscription hint. Keep one compact s
 
 - [x] **Step 3: Bind settings**
 
-Map each checkbox to its storage key, write on `change`, and refresh the page state after each write. Clearing the list resets only `channels`, `syncedAt`, and `initialSyncDone`; it must not remove `blockedChannels` or settings.
+Map each remaining checkbox to its storage key, write on `change`, and refresh
+the page state after each write. Clearing the list resets only `channels`,
+`syncedAt`, and `initialSyncDone`; it must not remove `blockedChannels` or
+settings.
 
 - [x] **Step 4: Show useful counts**
 

@@ -3,7 +3,6 @@
 
   const settingControls = {
     hideSubscribedChannels: document.getElementById("hide-subscribed"),
-    hideNotInterestedChannels: document.getElementById("hide-not-interested"),
     hideShorts: document.getElementById("hide-shorts"),
     filterRecommendations: document.getElementById("filter-recommendations"),
     updateAfterSubscriptionChange: document.getElementById("update-subscriptions"),
@@ -62,7 +61,6 @@
     const blocked = channelsOf(data.blockedChannels);
     const settings = {
       hideSubscribedChannels: true,
-      hideNotInterestedChannels: true,
       hideShorts: true,
       filterRecommendations: true,
       updateAfterSubscriptionChange: true,

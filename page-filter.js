@@ -10,7 +10,6 @@
   let blockedIndex = { ids: new Set(), handles: new Set(), customUrls: new Set(), names: new Set() };
   let settings = {
     hideSubscribedChannels: true,
-    hideNotInterestedChannels: true,
     filterRecommendations: true,
     hidePlayables: false,
     hideMembersOnly: false,
@@ -76,7 +75,7 @@
   function channelMatches(node) {
     if (location.pathname === "/" && !settings.filterRecommendations) return false;
     return (settings.hideSubscribedChannels && matchesIndex(node, index)) ||
-      (settings.hideNotInterestedChannels && matchesIndex(node, blockedIndex));
+      matchesIndex(node, blockedIndex);
   }
 
   function textOf(node) {

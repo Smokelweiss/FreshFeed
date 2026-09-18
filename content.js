@@ -6,7 +6,6 @@
   const DEFAULT_CHANNELS = { ids: [], handles: [], customUrls: [], names: [], records: [] };
   const DEFAULT_SETTINGS = {
     hideSubscribedChannels: true,
-    hideNotInterestedChannels: true,
     hideShorts: true,
     filterRecommendations: true,
     updateAfterSubscriptionChange: true,
@@ -296,7 +295,7 @@
       customUrls,
       names
     });
-    const blockedMatch = state.settings.hideNotInterestedChannels && matchesIndex(channel, {
+    const blockedMatch = matchesIndex(channel, {
       ids: blockedIds,
       handles: blockedHandles,
       customUrls: blockedCustomUrls,
