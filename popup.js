@@ -13,7 +13,7 @@
   let lastResetSignature = "";
 
   function channelsOf(value) {
-    return value && typeof value === "object" ? value : { ids: [], handles: [], names: [] };
+    return value && typeof value === "object" ? value : { ids: [], handles: [], customUrls: [], names: [] };
   }
 
   function channelCount(channels) {
@@ -81,7 +81,7 @@
   clear.addEventListener("click", async () => {
     if (window.confirm("Clear the entire subscription list?")) {
       await browser.storage.local.set({
-        channels: { ids: [], handles: [], names: [] },
+        channels: { ids: [], handles: [], customUrls: [], names: [] },
         syncedAt: null,
         initialSyncDone: false
       });

@@ -4,7 +4,7 @@
 
 # FreshFeed
 
-FreshFeed hides videos and Shorts from channels you subscribe to on the YouTube home page.
+FreshFeed hides videos and Shorts from channels you subscribe to on YouTube.
 
 ## Synchronization
 
@@ -16,6 +16,8 @@ FreshFeed keeps the list current in three ways:
 
 The primary import reads YouTube's subscription data and continuation pages directly, so it does not need to scroll through hundreds of rendered cards. A page-based fallback remains available if YouTube changes its internal data format.
 
+Filtering uses a compiled identity index for channel IDs, `@handles`, and legacy `c/...` or `user/...` URLs. When YouTube exposes channel data in JSON, FreshFeed removes matching renderers before they are displayed; the incremental DOM observer remains as a fallback for recycled or unsupported renderers.
+
 ## Features
 
 - Hide subscribed channels' videos and Shorts on YouTube Home.
@@ -23,6 +25,7 @@ The primary import reads YouTube's subscription data and continuation pages dire
 - Immediate updates after Subscribe and Unsubscribe actions.
 - Manual synchronization with progress reporting.
 - No telemetry and no third-party servers.
+- Large local lists use Firefox's unlimited local-storage quota and set-backed lookups rather than scanning every saved channel for every card.
 
 ## Requirements
 

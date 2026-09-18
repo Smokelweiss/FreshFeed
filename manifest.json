@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "FreshFeed",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "description": "Hides YouTube videos and Shorts from channels you are subscribed to.",
   "permissions": [
-    "storage"
+    "storage",
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "*://www.youtube.com/*"
@@ -37,6 +38,16 @@
     "96": "icons/icon96.png",
     "128": "icons/icon128.png"
   },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "page-filter.js"
+      ],
+      "matches": [
+        "*://www.youtube.com/*"
+      ]
+    }
+  ],
   "browser_specific_settings": {
     "gecko": {
       "id": "freshfeed@local",

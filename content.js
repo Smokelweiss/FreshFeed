@@ -2,8 +2,8 @@
   "use strict";
 
   const CARD_SELECTOR = "ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, ytd-reel-item-renderer";
-  const CHANNEL_LINK_SELECTOR = 'a[href^="/@"], a[href^="/channel/"]';
-  const DEFAULT_CHANNELS = { ids: [], handles: [], names: [] };
+  const CHANNEL_LINK_SELECTOR = 'a[href^="/@"], a[href^="/channel/"], a[href^="/c/"], a[href^="/user/"]';
+  const DEFAULT_CHANNELS = { ids: [], handles: [], customUrls: [], names: [], records: [] };
   let state = {
     enabled: true,
     channels: DEFAULT_CHANNELS,
@@ -15,6 +15,7 @@
   };
   let ids = new Set();
   let handles = new Set();
+  let customUrls = new Set();
   let names = new Set();
   let homeObserver = null;
   let homeTimer = null;
@@ -47,14 +48,25 @@
     if (parts[0].startsWith("@")) {
       return { handle: parts[0].toLowerCase() };
     }
+    if ((parts[0] === "c" || parts[0] === "user") && parts[1]) {
+      return { customUrl: parts[0] + "/" + parts[1].toLowerCase() };
+    }
     return {};
   }
 
+  function normCustomUrl(value) {
+    const normalized = String(value || "").trim().toLowerCase().replace(/^\/|\/$/g, "");
+    return /^(?:c|user)\/[^/]+$/.test(normalized) ? normalized : "";
+  }
+
   function normalizeChannelState(channels) {
+    const source = channels && typeof channels === "object" ? channels : {};
     return {
-      ids: Array.from(new Set(Array.isArray(channels && channels.ids) ? channels.ids.filter((item) => /^UC[\w-]+$/i.test(item)) : [])),
-      handles: Array.from(new Set(Array.isArray(channels && channels.handles) ? channels.handles.map((item) => String(item).toLowerCase()).filter((item) => /^@[^/]+$/.test(item)) : [])),
-      names: Array.from(new Set(Array.isArray(channels && channels.names) ? channels.names.map(normName).filter(Boolean) : []))
+      ids: Array.from(new Set(Array.isArray(source.ids) ? source.ids.filter((item) => /^UC[\w-]+$/i.test(item)) : [])),
+      handles: Array.from(new Set(Array.isArray(source.handles) ? source.handles.map((item) => String(item).toLowerCase()).filter((item) => /^@[^/]+$/.test(item)) : [])),
+      customUrls: Array.from(new Set(Array.isArray(source.customUrls) ? source.customUrls.map(normCustomUrl).filter(Boolean) : [])),
+      names: Array.from(new Set(Array.isArray(source.names) ? source.names.map(normName).filter(Boolean) : [])),
+      records: Array.isArray(source.records) ? source.records.filter((item) => item && typeof item === "object") : []
     };
   }
 
@@ -62,7 +74,35 @@
     state.channels = normalizeChannelState(state.channels);
     ids = new Set(state.channels.ids);
     handles = new Set(state.channels.handles);
+    customUrls = new Set(state.channels.customUrls);
     names = new Set(state.channels.names);
+    publishPageFilterIndex();
+  }
+
+  function publishPageFilterIndex() {
+    window.postMessage({
+      source: "freshfeed-content",
+      type: "index",
+      index: {
+        ids: state.channels.ids,
+        handles: state.channels.handles,
+        customUrls: state.channels.customUrls,
+        names: state.channels.names
+      }
+    }, "*");
+  }
+
+  function installPageFilter() {
+    window.addEventListener("message", (event) => {
+      if (event.source === window && event.data?.source === "freshfeed-page-filter" && event.data.type === "ready") {
+        publishPageFilterIndex();
+      }
+    }, true);
+    const script = document.createElement("script");
+    script.src = browser.runtime.getURL("page-filter.js");
+    script.async = false;
+    (document.documentElement || document.head).appendChild(script);
+    script.remove();
   }
 
   function titleOf(card) {
@@ -94,7 +134,7 @@
   }
 
   function extractChannel(card) {
-    const result = { ids: new Set(), handles: new Set(), names: new Set() };
+    const result = { ids: new Set(), handles: new Set(), customUrls: new Set(), names: new Set() };
     card.querySelectorAll(CHANNEL_LINK_SELECTOR).forEach((link) => {
       const parsed = parseChannelHref(link.getAttribute("href"));
       if (parsed.id) {
@@ -102,6 +142,9 @@
       }
       if (parsed.handle) {
         result.handles.add(parsed.handle);
+      }
+      if (parsed.customUrl) {
+        result.customUrls.add(parsed.customUrl);
       }
     });
     const nameSelectors = [
@@ -129,12 +172,13 @@
   }
 
   function hasChannelData(channel) {
-    return channel.ids.size > 0 || channel.handles.size > 0 || channel.names.size > 0;
+    return channel.ids.size > 0 || channel.handles.size > 0 || channel.customUrls.size > 0 || channel.names.size > 0;
   }
 
   function isSubscribed(channel) {
     return Array.from(channel.ids).some((id) => ids.has(id)) ||
       Array.from(channel.handles).some((handle) => handles.has(handle)) ||
+      Array.from(channel.customUrls || []).some((customUrl) => customUrls.has(customUrl)) ||
       Array.from(channel.names).some((name) => names.has(name));
   }
 
@@ -242,9 +286,9 @@
   function ownerChannel() {
     const owner = document.querySelector("ytd-video-owner-renderer");
     if (!owner) {
-      return { ids: new Set(), handles: new Set(), names: new Set() };
+      return { ids: new Set(), handles: new Set(), customUrls: new Set(), names: new Set() };
     }
-    const result = { ids: new Set(), handles: new Set(), names: new Set() };
+    const result = { ids: new Set(), handles: new Set(), customUrls: new Set(), names: new Set() };
     owner.querySelectorAll("a[href]").forEach((link) => {
       const parsed = parseChannelHref(link.getAttribute("href"));
       if (parsed.id) {
@@ -252,6 +296,9 @@
       }
       if (parsed.handle) {
         result.handles.add(parsed.handle);
+      }
+      if (parsed.customUrl) {
+        result.customUrls.add(parsed.customUrl);
       }
     });
     const name = normName(owner.querySelector("ytd-channel-name #text") && owner.querySelector("ytd-channel-name #text").textContent);
@@ -265,15 +312,18 @@
     const next = {
       ids: new Set(state.channels.ids),
       handles: new Set(state.channels.handles),
+      customUrls: new Set(state.channels.customUrls),
       names: new Set(state.channels.names)
     };
     const operation = remove ? "delete" : "add";
     channel.ids.forEach((value) => next.ids[operation](value));
     channel.handles.forEach((value) => next.handles[operation](value));
+    (channel.customUrls || []).forEach((value) => next.customUrls[operation](value));
     channel.names.forEach((value) => next.names[operation](value));
     const channels = {
       ids: Array.from(next.ids),
       handles: Array.from(next.handles),
+      customUrls: Array.from(next.customUrls),
       names: Array.from(next.names)
     };
     return { changed: JSON.stringify(state.channels) !== JSON.stringify(channels), channels };
@@ -380,7 +430,7 @@
   }
 
   function channelCount(channels) {
-    return Math.max(channels.ids.length, channels.handles.length, channels.names.length);
+    return Array.isArray(channels && channels.ids) ? channels.ids.length : 0;
   }
 
   async function waitForReady() {
@@ -463,10 +513,13 @@
       const handle = typeof canonical === "string" && canonical.startsWith("/@")
         ? canonical.split("/")[1].toLowerCase()
         : "";
+      const customUrl = typeof canonical === "string" ? normCustomUrl(canonical) : "";
       if (!result.channels.has(node.channelId)) {
-        result.channels.set(node.channelId, { id: node.channelId, name, handle });
+        result.channels.set(node.channelId, { id: node.channelId, name, handle, customUrl });
       } else if (handle && !result.channels.get(node.channelId).handle) {
         result.channels.get(node.channelId).handle = handle;
+      } else if (customUrl && !result.channels.get(node.channelId).customUrl) {
+        result.channels.get(node.channelId).customUrl = customUrl;
       }
     }
     if (node.continuationCommand && typeof node.continuationCommand.token === "string") {
@@ -560,11 +613,14 @@
       round += 1;
       onProgress({ count: result.channels.size, round });
     }
-    const channels = { ids: [], handles: [], names: [] };
+    const channels = { ids: [], handles: [], customUrls: [], names: [] };
     result.channels.forEach((channel) => {
       channels.ids.push(channel.id);
       if (channel.handle) {
         channels.handles.push(channel.handle);
+      }
+      if (channel.customUrl) {
+        channels.customUrls.push(channel.customUrl);
       }
       if (channel.name) {
         channels.names.push(channel.name);
@@ -633,7 +689,7 @@
   }
 
   function collectVisibleSubscriptions() {
-    const channels = { ids: new Set(), handles: new Set(), names: new Set() };
+    const channels = { ids: new Set(), handles: new Set(), customUrls: new Set(), names: new Set() };
     const channelRoots = document.querySelectorAll(
       "ytd-channel-renderer, ytd-grid-channel-renderer, ytd-channel-list-sub-menu-renderer"
     );
@@ -650,6 +706,9 @@
         if (parsed.handle) {
           channels.handles.add(parsed.handle);
         }
+        if (parsed.customUrl) {
+          channels.customUrls.add(parsed.customUrl);
+        }
         const name = normName(link.textContent || link.getAttribute("title") || link.getAttribute("aria-label"));
         if (name && name.length < 160) {
           channels.names.add(name);
@@ -665,6 +724,7 @@
     return normalizeChannelState({
       ids: Array.from(channels.ids),
       handles: Array.from(channels.handles),
+      customUrls: Array.from(channels.customUrls),
       names: Array.from(channels.names)
     });
   }
@@ -726,9 +786,9 @@
 
   function readChannelFromRoot(root) {
     if (!root) {
-      return { ids: new Set(), handles: new Set(), names: new Set() };
+      return { ids: new Set(), handles: new Set(), customUrls: new Set(), names: new Set() };
     }
-    const result = { ids: new Set(), handles: new Set(), names: new Set() };
+    const result = { ids: new Set(), handles: new Set(), customUrls: new Set(), names: new Set() };
     const href = root.getAttribute("data-channel-id") || root.getAttribute("data-channel-handle") || root.querySelector("a[href]") && root.querySelector("a[href]").getAttribute("href") || "";
     const parsed = parseChannelHref(href);
     if (parsed.id) {
@@ -736,6 +796,9 @@
     }
     if (parsed.handle) {
       result.handles.add(parsed.handle);
+    }
+    if (parsed.customUrl) {
+      result.customUrls.add(parsed.customUrl);
     }
     const name = normName(root.querySelector("#text, yt-formatted-string, ytd-channel-name") && (root.querySelector("#text, yt-formatted-string, ytd-channel-name").textContent || root.querySelector("#text, yt-formatted-string, ytd-channel-name").getAttribute("title")));
     if (name) {
@@ -852,6 +915,7 @@
     state.syncLock = saved.syncLock || null;
     state.syncProgress = saved.syncProgress || null;
     state.syncFallback = Boolean(saved.syncFallback);
+    installPageFilter();
     if (saved.initialSyncDone !== true && !saved.syncPending && !saved.syncFallback) {
       await browser.storage.local.set({ syncPending: true, syncPendingAt: Date.now() });
       state.syncPending = true;
