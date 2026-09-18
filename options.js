@@ -89,7 +89,7 @@
 
   function render(data) {
     const settings = settingsOf(data);
-    Object.entries(settingControls).forEach(([key, control]) => { control.checked = settings[key] !== false; });
+    Object.entries(settingControls).forEach(([key, control]) => { control.checked = settings[key] === true; });
     Object.entries(numericControls).forEach(([key, control]) => {
       control.value = Number(settings[key]) || (key.includes("Min") ? 1 : key.includes("Date") ? 30 : 60);
     });

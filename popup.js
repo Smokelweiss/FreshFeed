@@ -26,6 +26,12 @@
     durationUnit: document.getElementById("duration-unit")
   };
   const defaults = {
+    hideSubscribedChannels: true,
+    hideShorts: true,
+    hidePlayables: true,
+    hideBlacklisted: true,
+    hideMembersOnly: false,
+    hideMixRadio: false,
     filterUploadDate: false,
     uploadDateMode: "olderThan",
     uploadDateUnit: "days",
@@ -48,10 +54,10 @@
 
   async function refresh() {
     const data = await browser.storage.local.get([...Object.keys(settingControls), "lastSyncResult"]);
-    Object.entries(settingControls).forEach(([key, control]) => {
-      control.checked = data[key] !== false;
-    });
     const settings = { ...defaults, ...data };
+    Object.entries(settingControls).forEach(([key, control]) => {
+      control.checked = settings[key] === true;
+    });
     Object.entries(numericControls).forEach(([key, control]) => {
       control.value = Number(settings[key]) || (key.includes("Min") ? 1 : key.includes("Date") ? 30 : 60);
     });
