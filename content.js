@@ -468,7 +468,7 @@
     if (location.pathname === "/feed/channels" && state.syncFallback) {
       startFallbackSync();
     }
-    if (location.pathname.startsWith("/watch")) {
+    if (location.pathname.startsWith("/watch") || isFilterSurface()) {
       scheduleDynamicCheck();
       installVideoMenuObserver();
     }
@@ -480,10 +480,7 @@
       injectVideoBlockMenuItem();
     }
 
-    function injectVideoBlockMenuItem() {
-      if (!location.pathname.startsWith("/watch") || document.querySelector("[data-ff-video-block-channel]")) return;
-      const menu = document.querySelector("ytd-menu-popup-renderer #items, ytd-menu-popup-renderer tp-yt-paper-listbox, ytd-popup-container ytd-menu-popup-renderer");
-      if (!menu) return;
+    function createBlockMenuItem(channel, card) {
       const item = document.createElement("ytd-menu-service-item-renderer");
       item.setAttribute("data-ff-video-block-channel", "1");
       item.setAttribute("role", "menuitem");
@@ -496,7 +493,7 @@
       paperItem.style.cssText = "display:flex;align-items:center;box-sizing:border-box;min-height:48px;padding:0 16px;visibility:visible;opacity:1;color:inherit;cursor:pointer";
       const icon = document.createElement("yt-icon");
       icon.className = "style-scope ytd-menu-service-item-renderer";
-      icon.style.cssText = "margin-right:16px;width:24px;height:24px;display:inline-flex";
+      icon.style.cssText = "margin-right:16px;width:24px;height:24px;display:inline-flex;color:#f00";
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       svg.setAttribute("viewBox", "0 0 24 24");
       svg.setAttribute("width", "24");
@@ -504,21 +501,41 @@
       svg.setAttribute("aria-hidden", "true");
       const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
       path.setAttribute("fill", "currentColor");
-      path.setAttribute("d", "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm5 11H7v-2h10v2Z");
+      path.setAttribute("d", "M5 3a1 1 0 0 1 1-1h12a1 1 0 0 1 .8 1.6L15.25 8l3.55 4.4A1 1 0 0 1 18 14H7v7H5V3Zm2 2v7h8.9l-2.75-3.4a1 1 0 0 1 0-1.2L15.9 5H7Z");
       svg.appendChild(path);
       icon.appendChild(svg);
       const label = document.createElement("span");
       label.id = "label";
       label.className = "style-scope ytd-menu-service-item-renderer";
-      label.style.cssText = "display:block;flex:1;visibility:visible;opacity:1;color:inherit;font:inherit;white-space:nowrap";
+      label.style.cssText = "display:block;flex:1;visibility:visible;opacity:1;color:#f00;font:inherit;white-space:nowrap";
       label.textContent = "Hide this channel";
       paperItem.append(icon, label);
       item.appendChild(paperItem);
       item.addEventListener("click", () => {
-        addBlockedChannel(ownerChannel(), null);
+        addBlockedChannel(channel, card);
         item.remove();
       });
-      menu.appendChild(item);
+      return item;
+    }
+
+    function injectVideoBlockMenuItem() {
+      const menu = document.querySelector("ytd-menu-popup-renderer #items, ytd-menu-popup-renderer tp-yt-paper-listbox, ytd-popup-container ytd-menu-popup-renderer");
+      if (!menu || menu.querySelector("[data-ff-video-block-channel]")) return;
+      if (location.pathname.startsWith("/watch")) {
+        const channel = ownerChannel();
+        if (hasChannelData(channel)) {
+          menu.appendChild(createBlockMenuItem(channel, null));
+        }
+        return;
+      }
+      if (!isFilterSurface() || !lastMenuContext || Date.now() - lastMenuContext.at >= 10000) return;
+      const card = lastMenuContext.card;
+      const channel = lastMenuContext.channel && hasChannelData(lastMenuContext.channel)
+        ? lastMenuContext.channel
+        : extractChannel(card);
+      if (card && hasChannelData(channel)) {
+        menu.appendChild(createBlockMenuItem(channel, card));
+      }
     }
   }
 

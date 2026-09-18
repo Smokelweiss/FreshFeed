@@ -72,10 +72,10 @@
   }
 
   function channelCount(channels) {
-    return channelKeys.reduce((total, key) => {
-      const value = channels[key] || [];
-      return total + (typeof value.size === "number" ? value.size : value.length);
-    }, 0);
+    if (channels.ids.length) {
+      return channels.ids.length;
+    }
+    return Math.max(...channelKeys.map((key) => channels[key].length), 0);
   }
 
   function settingsOf(data) {
@@ -106,7 +106,7 @@
     document.querySelector(".duration-unit-label").textContent = settings.durationUnit;
     const channels = channelsOf(data.channels);
     const blockedChannels = channelsOf(data.blockedChannels);
-    count.textContent = "Subscribed identities: " + channelCount(channels) + " · Blacklisted identities: " + channelCount(blockedChannels);
+    count.textContent = "Subscribed channels: " + channelCount(channels) + " · Blacklisted channels: " + channelCount(blockedChannels);
     synced.textContent = "Last sync: " + (data.syncedAt ? new Date(data.syncedAt).toLocaleString("en-US") : "never");
     progressWrap.hidden = !data.syncProgress;
     if (data.syncProgress) progressText.textContent = "Syncing… found " + (data.syncProgress.count || 0);

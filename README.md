@@ -28,6 +28,9 @@ Filtering uses a compiled identity index for channel IDs, `@handles`, and legacy
 - No telemetry and no third-party servers.
 - Large local lists use Firefox's unlimited local-storage quota and set-backed lookups rather than scanning every saved channel for every card.
 
+The options page reports the number of subscribed channels by canonical YouTube
+channel ID, rather than adding IDs, handles, and display names together.
+
 The popup provides quick filtering switches for Subscribed Channels, Shorts,
 Playables, Blacklisted channels, Members-only videos, and Mix/Radio playlists.
 Detailed
