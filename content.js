@@ -1127,6 +1127,7 @@
     endlessOn: false,
     exhausted: false,
     reloadButton: "",
+    reloadCandidates: [],
     presses: 0,
     pressesThatGrew: 0,
     gaveUp: false,
@@ -1178,6 +1179,7 @@
     diag.reloadButton = button
       ? String(button.getAttribute("aria-label") || button.innerText || "").replace(/\s+/g, " ").trim().slice(0, 40)
       : "";
+    diag.reloadCandidates = (found.candidates || []).slice(0, 12);
     diagDirty = true;
   }
 
@@ -1253,14 +1255,43 @@
     const sentinel = findFeedContinuation();
     if (!sentinel) return null;
 
+    // Two nudges, because neither alone is reliable across YouTube builds.
+    //
+    // The transform pulls the sentinel into the viewport without touching
+    // layout, scrollTop or scrollHeight, which is enough when the load is driven
+    // by an IntersectionObserver. It is not enough if YouTube also gates on the
+    // real scroll position, which some builds do.
+    //
+    // So a one-pixel scroll happens as well: enough to fire scroll listeners and
+    // to re-evaluate the observer, and restored on the next frame so the page
+    // never visibly moves. scrollIntoView is still not used -- it moves the
+    // user to the bottom of the feed, which is the behaviour that got this
+    // feature rejected.
     const previous = sentinel.style.transform;
     try {
       sentinel.style.transform = "translateY(-100vh)";
-      note("nudge");
     } catch (error) {
-      note("nudge-failed");
+      note("nudge-transform-failed");
       return null;
     }
+
+    const doc = document.scrollingElement || document.documentElement;
+    let restored = false;
+    try {
+      if (doc) {
+        const at = doc.scrollTop;
+        doc.scrollTop = at + 1;
+        window.requestAnimationFrame(() => {
+          if (restored) return;
+          restored = true;
+          doc.scrollTop = at;
+        });
+      }
+    } catch (error) {
+      note("nudge-scroll-failed");
+    }
+
+    note("nudge");
     window.setTimeout(() => {
       if (sentinel.isConnected) sentinel.style.transform = previous;
     }, 900);
@@ -1394,14 +1425,18 @@
     settlePollMs: 300
   };
 
-  // What YouTube calls the reload affordance, across locales. Matched against a
-  // normalised aria-label or button text, and only on buttons inside the feed's
-  // continuation area, so an unrelated "More" elsewhere on the page is never hit.
-  const ENDLESS_RELOAD_LABELS = [
-    "show more", "load more", "more videos", "see more", "more",
-    "показать ещё", "показать еще", "ещё", "еще",
-    "загрузить ещё", "загрузить еще", "больше видео", "ещё видео"
+  // What YouTube calls the reload affordance, across locales.
+  //
+  // Split in two because the bare words are ambiguous. "Show more" and
+  // "показать ещё" mean the feed. Plain "More" and "еще" also mean every shelf
+  // header and chip row on the page, so those only qualify as a last resort and
+  // only when nothing else matched.
+  const ENDLESS_RELOAD_STRONG = [
+    "show more", "load more", "more videos", "see more videos", "show more videos",
+    "показать ещё", "показать еще", "загрузить ещё", "загрузить еще",
+    "ещё видео", "еще видео", "больше видео", "показать больше"
   ];
+  const ENDLESS_RELOAD_WEAK = ["more", "ещё", "еще", "больше"];
 
   let endlessTimer = null;
   let endlessPresses = 0;
@@ -1475,55 +1510,85 @@
 
   // Finds YouTube's own "Show more" button.
   //
-  // Scoped to the continuation area on purpose. A loose text match anywhere on
-  // the page would eventually hit an unrelated control labelled "More" and click
-  // something the user never asked to click -- the exact class of bug that makes
-  // an extension feel like it is taking over the browser.
+  // Two earlier mistakes, both of which the user hit:
+  //
+  //   * Scoping to the continuation area only. The reload UI is not always
+  //     wrapped in ytd-continuation-item-renderer on the modern home feed.
+  //   * Taking the FIRST button whose text matched, from a list that included
+  //     the bare words "more" / "еще". Shelves, chip rows and section headers
+  //     all have buttons called "More", so this reliably clicked something that
+  //     had nothing to do with the feed: the corner showed "updating" and the
+  //     feed never grew.
+  //
+  // So candidates are now scored. An explicit phrase ("show more", "load more",
+  // "показать ещё", "ещё видео") outranks a bare "more", and among equals the
+  // one nearest the bottom of the grid wins -- the feed's own reload control is
+  // always last. Every candidate is recorded so the Diagnostics panel can show
+  // exactly what was on the page.
   function findFeedReloadButton() {
-    // Every scope here is inside the home feed grid on purpose. The reload UI is
-    // sometimes rendered inside ytd-continuation-item-renderer and sometimes
-    // directly in the grid contents, so both are scanned; nothing outside the
-    // grid is, because a page-wide "More" match would click something the user
-    // never asked to click.
-    const scopes = [
+    found.button = null;
+    found.candidates = [];
+
+    const grid = document.querySelector("ytd-rich-grid-renderer");
+    if (!grid) return null;
+    const roots = new Set();
+    [
       "ytd-continuation-item-renderer",
       "#continuations",
       "ytd-rich-grid-renderer #continuations",
-      "ytd-rich-grid-renderer #contents",
-      "ytd-rich-grid-renderer"
-    ];
+      "ytd-rich-grid-renderer #contents"
+    ].forEach((scope) => {
+      grid.querySelectorAll(scope).forEach((el) => roots.add(el));
+    });
+    roots.add(grid);
+
+    const scored = [];
     const seen = new Set();
-    for (const scope of scopes) {
-      document.querySelectorAll(scope).forEach((root) => {
-        if (seen.has(root)) return;
-        seen.add(root);
-        const buttons = root.querySelectorAll(
-          "button, ytd-button-renderer, [role='button'], a[href='#'], a[role='button']"
-        );
-        buttons.forEach((button) => {
-          if (seen.has(button)) return;
-          seen.add(button);
-          if (button.disabled || button.hasAttribute("disabled") || button.getAttribute("aria-disabled") === "true") return;
-          if (!button.isConnected) return;
-          const raw =
-            button.getAttribute("aria-label") ||
-            button.getAttribute("title") ||
-            button.innerText ||
-            button.textContent ||
-            "";
-          const label = String(raw).replace(/\s+/g, " ").trim().toLowerCase();
-          if (!label || label.length > 40) return;
-          if (ENDLESS_RELOAD_LABELS.some((t) => label === t || label.startsWith(t))) {
-            found.button = button;
-          }
-        });
+    for (const root of roots) {
+      root.querySelectorAll(
+        "button, ytd-button-renderer, [role='button'], a[href='#'], a[role='button']"
+      ).forEach((button) => {
+        if (seen.has(button)) return;
+        seen.add(button);
+        if (button.disabled || button.hasAttribute("disabled") || button.getAttribute("aria-disabled") === "true") return;
+        if (!button.isConnected) return;
+        const raw =
+          button.getAttribute("aria-label") ||
+          button.getAttribute("title") ||
+          button.innerText ||
+          button.textContent ||
+          "";
+        const label = String(raw).replace(/\s+/g, " ").trim().toLowerCase();
+        if (!label || label.length > 40) return;
+
+        const strong = ENDLESS_RELOAD_STRONG.some((t) => label === t || label.startsWith(t));
+        const weak = !strong && ENDLESS_RELOAD_WEAK.some((t) => label === t || label.startsWith(t));
+        if (!strong && !weak) return;
+
+        let top = 0;
+        try {
+          const rect = button.getBoundingClientRect ? button.getBoundingClientRect() : null;
+          if (rect) top = rect.top + (window.scrollY || 0);
+          else return; // Off-screen and unmeasurable: cannot rank it safely.
+        } catch (error) {
+          return;
+        }
+        scored.push({ button, label, strong, top });
+        found.candidates.push((strong ? "STRONG " : "weak   ") + '"' + label + '" at ' + Math.round(top));
       });
-      if (found.button) break;
     }
+
+    if (!scored.length) return null;
+    scored.sort((a, b) => {
+      if (a.strong !== b.strong) return a.strong ? -1 : 1;
+      return b.top - a.top;
+    });
+    found.button = scored[0].button;
+    found.chosenLabel = scored[0].label;
     return found.button;
   }
 
-  const found = { button: null };
+  const found = { button: null, candidates: [], chosenLabel: "" };
 
   function scheduleEndlessRecovery() {
     if (!endlessFeedEnabled() || endlessRunning) return;

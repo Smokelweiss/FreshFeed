@@ -315,6 +315,9 @@
     lines.push("Endless feed");
     lines.push("  feed seen exhausted: " + yes(d.exhausted));
     lines.push("  reload button found: " + (d.reloadButton ? '"' + d.reloadButton + '"' : "no"));
+    const cands = d.reloadCandidates || [];
+    lines.push("  buttons considered : " + (cands.length ? "" : "none"));
+    cands.forEach((c) => lines.push("      " + c));
     lines.push("  presses            : " + d.presses);
     lines.push("  presses that grew  : " + d.pressesThatGrew);
     lines.push("  gave up            : " + yes(d.gaveUp));

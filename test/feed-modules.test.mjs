@@ -39,8 +39,14 @@ function makeEl(tag, opts = {}) {
     style: { transform: '' },
     matches(sel) { return this._matches.includes(sel) },
     querySelectorAll(sel) {
-      // A container exposes only the fake buttons it was given.
-      if (/button|role|href/.test(sel)) return this._children.filter((c) => c._isButton)
+      // A container exposes the fake buttons it was given, both when asked for
+      // buttons directly and when asked for a scope inside the grid -- that is
+      // what the real DOM does: the reload button lives inside the continuation
+      // or contents wrapper.
+      if (/button|role|href/.test(sel) ||
+          /ytd-continuation-item-renderer|#continuations|#contents|ytd-rich-grid-renderer/.test(sel)) {
+        return this._children.filter((c) => c._isButton)
+      }
       return this._children.filter((c) => c._matches.includes(sel))
     },
     querySelector(sel) { return this.querySelectorAll(sel)[0] || null },
@@ -140,7 +146,9 @@ globalThis.document = {
   createElement: (t) => makeEl(t),
   addEventListener() {}, removeEventListener() {}
 }
-gridEl._children = world.buttons
+// Live link to the current button list, so tests that replace world.buttons do
+// not leave the grid pointing at a stale array.
+Object.defineProperty(gridEl, '_children', { get: () => world.buttons })
 
 globalThis.window = {
   innerHeight: world.innerHeight,
@@ -212,6 +220,10 @@ function makeButton(label, opts = {}) {
   const btn = makeEl('button', { innerText: label, disabled: opts.disabled, hidden: opts.hidden })
   btn._isButton = true
   if (opts.aria) btn._attrs['aria-label'] = opts.aria
+  // Per-button document position, so ranking by "closest to the bottom" can be
+  // exercised. Defaults to the top of the page.
+  const top = typeof opts.top === 'number' ? opts.top : 0
+  btn.getBoundingClientRect = () => ({ top, bottom: top + 40, height: 40, width: 120 })
   return btn
 }
 
@@ -462,6 +474,32 @@ check('diagnostics record the methods seen on the grid', Array.isArray(M.diag.me
 check('diagnostics record the reload button label', typeof M.diag.reloadButton === 'string', 'label=' + JSON.stringify(M.diag.reloadButton))
 check('diagnostics record cards and buffer', M.diag.cards > 0 && typeof M.diag.bufferScreens === 'number',
   'cards=' + M.diag.cards + ' buffer=' + M.diag.bufferScreens)
+
+// Button ranking. The bug the user hit was pressing the wrong button: shelves
+// and chip rows have "More" buttons, and the first match was taken.
+const shelfMore = makeButton('Еще', { top: 400 })
+const feedMore = makeButton('Ещё', { top: 9000 })
+resetWorld({ scrollHeight: 1000, scrollTop: 0, sentinel: null })
+world.buttons = [shelfMore, feedMore]
+check('picks the bottom-most of several ambiguous buttons', M.findFeedReloadButton() === feedMore)
+
+const explicit = makeButton('Show more', { top: 500 })
+const lowerWeak = makeButton('More', { top: 9500 })
+resetWorld({ scrollHeight: 1000, scrollTop: 0, sentinel: null })
+world.buttons = [explicit, lowerWeak]
+check('an explicit "show more" outranks a bare "More" further down', M.findFeedReloadButton() === explicit)
+
+diagWrites.length = 0
+M.snapshotPage()
+const recorded = (diagWrites.length ? diagWrites[diagWrites.length - 1].feedDiag : null) || M.diag
+check('candidate buttons are recorded for the report', (recorded.reloadCandidates || []).length >= 2,
+  'candidates=' + JSON.stringify(recorded.reloadCandidates))
+
+resetWorld({ scrollHeight: 1000, scrollTop: 0, sentinel: null })
+const enabledUp = makeButton('Ещё', { top: 300 })
+const disabledDown = makeButton('Ещё', { top: 9500, disabled: true })
+world.buttons = [enabledUp, disabledDown]
+check('disabled buttons are skipped even when lower', M.findFeedReloadButton() === enabledUp)
 
 console.log('\n=== ' + pass + ' passed, ' + fail + ' failed ===')
 process.exit(fail ? 1 : 0)
