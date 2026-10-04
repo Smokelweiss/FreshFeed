@@ -1012,8 +1012,11 @@
     // between requests, so the loop still cannot free-run.
     tickMs: 900,
     // Give up on the whole page load only after this many consecutive rounds
-    // that YouTube genuinely could not answer.
-    maxDeadRounds: 6
+    // that YouTube genuinely could not answer. Reaching it now triggers a long
+    // pause and another attempt, never a permanent shutdown.
+    maxDeadRounds: 6,
+    // How long to wait after a run of dead rounds before trying again.
+    pauseAfterDeadMs: 30000
   };
 
   let lookaheadTimer = null;
@@ -1086,12 +1089,12 @@
   // is what makes the feature work in the background: previously the only way
   // to get another round was a user scroll event, so a tab left alone could
   // never make progress.
-  function armLookaheadTimer() {
+  function armLookaheadTimer(delayMs) {
     if (lookaheadTimer) return;
     lookaheadTimer = window.setTimeout(() => {
       lookaheadTimer = null;
       runLookahead();
-    }, LOOKAHEAD.tickMs);
+    }, typeof delayMs === "number" ? delayMs : LOOKAHEAD.tickMs);
   }
 
   // --- Diagnostics ----------------------------------------------------------
@@ -1119,6 +1122,7 @@
     methodsOnGrid: [],
     methodsOnApi: [],
     lookaheadOn: false,
+    ticks: 0,
     rounds: 0,
     requests: [],
     growthSeen: 0,
@@ -1302,14 +1306,24 @@
     if (!lookaheadActive || lookaheadRunning) return;
 
     diag.lookaheadOn = true;
+    diag.ticks += 1;
     snapshotPage();
 
+    // Stop the runaway guardrail, but never switch the feature off for the rest
+    // of the visit.
+    //
+    // Measured on a real page: the nudge grew the feed 11 times, then one round
+    // missed its settle window, the dead counter reached 6 and the feature shut
+    // itself down permanently. That is the same "worked, then went silent"
+    // failure as before, only later. A flaky trigger on a busy page is normal;
+    // it is not a reason to give up for good.
     if (lookaheadDeadRounds >= LOOKAHEAD.maxDeadRounds) {
-      stopFeedLookahead();
-      diag.stopped = true;
-      diag.stoppedBecause = "maxDeadRounds=" + lookaheadDeadRounds +
-        " requests=" + (diag.requests.join(",") || "none");
-      flushDiag(true);
+      // Back off hard, drop the counter, and try again. The user is never told
+      // and the page is never touched.
+      lookaheadDeadRounds = 0;
+      lookaheadLastRun = Date.now();
+      diag.stopped = false;
+      armLookaheadTimer(LOOKAHEAD.pauseAfterDeadMs);
       return;
     }
 
@@ -1420,6 +1434,11 @@
     // button when it genuinely has another batch; if pressing it stops producing
     // items, something is wrong and retrying forever would hammer the site.
     maxPresses: 30,
+    // A candidate button is only accepted within this many screens of the bottom
+    // of the grid. Measured on a real 679-card page: the only "more" buttons
+    // present sat near the top (document positions 442, 860, 30075) and were
+    // shelf and chip controls, so pressing them did nothing.
+    buttonTailScreens: 2,
     // How long to wait for a pressed button to actually deliver items.
     settleMs: 8000,
     settlePollMs: 300
@@ -1583,6 +1602,38 @@
       if (a.strong !== b.strong) return a.strong ? -1 : 1;
       return b.top - a.top;
     });
+
+    // Guard against pressing something that is not the end of the feed.
+    //
+    // Measured on a real page with 679 cards: the only matching buttons sat at
+    // document positions 442, 860 and 30075, all near the top. Those are shelf
+    // and chip controls. YouTube's own reload control is drawn at the very end of
+    // the grid, so a candidate is only accepted when it is within the last
+    // couple of screens. Anything higher up is a decoy and is ignored entirely
+    // rather than ranked lower.
+    let gridBottom = 0;
+    try {
+      const gridRect = grid.getBoundingClientRect ? grid.getBoundingClientRect() : null;
+      gridBottom = gridRect
+        ? gridRect.bottom + (window.scrollY || 0) + window.innerHeight
+        : 0;
+    } catch (error) {
+      gridBottom = 0;
+    }
+    if (gridBottom > 0) {
+      const limit = gridBottom - window.innerHeight * ENDLESS.buttonTailScreens;
+      const atEnd = scored.filter((c) => c.top >= limit);
+      if (!atEnd.length) {
+        found.candidates.push(
+          "rejected: nothing near the end of the grid (bottom " + Math.round(gridBottom) +
+          ", closest candidate at " + Math.round(scored[0].top) + ")"
+        );
+        return null;
+      }
+      scored.length = 0;
+      scored.push(...atEnd);
+    }
+
     found.button = scored[0].button;
     found.chosenLabel = scored[0].label;
     return found.button;

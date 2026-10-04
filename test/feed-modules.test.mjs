@@ -150,6 +150,10 @@ globalThis.document = {
 // not leave the grid pointing at a stale array.
 Object.defineProperty(gridEl, '_children', { get: () => world.buttons })
 
+// Configurable geometry, so the grid's own height can be simulated.
+gridEl._rect = { top: 0, bottom: 0, height: 10, width: 10 }
+gridEl.getBoundingClientRect = function () { return this._rect }
+
 globalThis.window = {
   innerHeight: world.innerHeight,
   addEventListener() {}, removeEventListener() {},
@@ -500,6 +504,47 @@ const enabledUp = makeButton('Ещё', { top: 300 })
 const disabledDown = makeButton('Ещё', { top: 9500, disabled: true })
 world.buttons = [enabledUp, disabledDown]
 check('disabled buttons are skipped even when lower', M.findFeedReloadButton() === enabledUp)
+
+// Only a button at the very end of the grid counts. On the real page every
+// candidate sat near the top (positions 442, 860, 30075 out of 679 cards) and
+// pressing one of those did nothing.
+const farTop = makeButton('Ещё', { top: 300 })
+const veryEnd = makeButton('Ещё', { top: 30000 })
+resetWorld({ scrollHeight: 31000, scrollTop: 30000, sentinel: null })
+gridEl._rect = { top: 0, bottom: 30000, height: 30000, width: 1000 }
+world.buttons = [farTop, veryEnd]
+check('a button near the top of a long feed is rejected', M.findFeedReloadButton() !== farTop,
+  'chose=' + (M.findFeedReloadButton() === veryEnd ? 'bottom button' : 'none'))
+
+resetWorld({ scrollHeight: 31000, scrollTop: 30000, sentinel: null })
+gridEl._rect = { top: 0, bottom: 30000, height: 30000, width: 1000 }
+world.buttons = [farTop, veryEnd]
+check('the button at the end of the grid is accepted', M.findFeedReloadButton() === veryEnd)
+
+resetWorld({ scrollHeight: 31000, scrollTop: 30000, sentinel: null })
+gridEl._rect = { top: 0, bottom: 30000, height: 30000, width: 1000 }
+world.buttons = [farTop]
+check('with only a decoy present, nothing is pressed', M.findFeedReloadButton() === null)
+gridEl._rect = { top: 0, bottom: 0, height: 10, width: 10 }
+
+// Smooth scroll must never switch itself off for the rest of the visit. On a
+// real page it grew the feed 11 times and then died on the sixth dead round.
+resetWorld({ scrollHeight: 1400, scrollTop: 0 })
+gridEl.api = undefined
+M.LOOKAHEAD.pauseAfterDeadMs = 30   // keep the recovery inside test time
+M.resetFeedLookahead()
+world.sentinel = null
+M.diag.ticks = 0
+for (let i = 0; i < 20; i++) {
+  M.schedulePrefetch()
+  await advance(120)
+}
+check('lookahead keeps running after maxDeadRounds', M.diag.stopped !== true,
+  'stopped=' + M.diag.stopped + ' ticks=' + M.diag.ticks)
+// Twenty opportunities must produce far more than the dead-round cap worth of
+// ticks, which is only possible if the feature resumed after the pause.
+check('and resumes after the pause instead of staying dead', M.diag.ticks > M.LOOKAHEAD.maxDeadRounds * 2,
+  'ticks=' + M.diag.ticks + ' cap=' + M.LOOKAHEAD.maxDeadRounds)
 
 console.log('\n=== ' + pass + ' passed, ' + fail + ' failed ===')
 process.exit(fail ? 1 : 0)

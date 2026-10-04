@@ -305,6 +305,7 @@
     lines.push("  methods on api     : " + ((d.methodsOnApi || []).join(", ") || "none"));
     lines.push("");
     lines.push("Smooth scroll");
+    lines.push("  loop ticks         : " + d.ticks);
     lines.push("  rounds run         : " + d.rounds);
     lines.push("  requests issued    : " + ((d.requests || []).join(", ") || "none"));
     lines.push("  times feed grew    : " + d.growthSeen);
