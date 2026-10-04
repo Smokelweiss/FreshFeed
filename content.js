@@ -1112,34 +1112,44 @@
     runLookahead();
   }
 
-  // Ask YouTube for the next page through its own continuation mechanism. Its
-  // IntersectionObserver is what actually issues the request, so bringing the
-  // sentinel into view is the supported way in. When the hydrated app exposes
-  // its API we prefer that, because it does not move the page under the user.
+  // Ask YouTube for the next page without ever moving the page.
+  //
+  // The preferred route is the app's own API. The fallback deliberately does NOT
+  // scroll the sentinel into view: that is how YouTube triggers its own fetch,
+  // but scrollIntoView also moves the user's viewport, so on a short buffer it
+  // would yank them to the bottom of the feed unprompted. An extension that
+  // moves the page is an extension the user stops trusting.
+  //
+  // So when there is no API to call, a round only proceeds if the sentinel is
+  // already at the edge of the viewport -- i.e. the user has scrolled there
+  // themselves. Otherwise we wait for the next tick and try the API again.
   function requestMoreFromYouTube() {
     const grid = document.querySelector("ytd-rich-grid-renderer");
     const app = document.querySelector("ytd-app");
     const api = (grid && grid.api) || (app && app.api);
-    if (api && typeof api.reloadContinuationItems === "function") {
-      try {
-        api.reloadContinuationItems();
-        return true;
-      } catch (error) {
-        // Fall through to the sentinel; the API name changes over time.
+    if (api) {
+      for (const name of ["reloadContinuationItems", "handleAppendContinuationItemsAction"]) {
+        if (typeof api[name] === "function") {
+          try {
+            api[name]();
+            return true;
+          } catch (error) {
+            // Fall through to the next candidate.
+          }
+        }
       }
     }
+
     const sentinel = findFeedContinuation();
     if (!sentinel) return false;
-    try {
-      sentinel.scrollIntoView({ block: "end", behavior: "instant" });
-    } catch (error) {
-      try {
-        sentinel.scrollIntoView(false);
-      } catch (ignored) {
-        return false;
-      }
-    }
-    return true;
+
+    // Only act if the sentinel is already visible, so the IntersectionObserver
+    // that triggers the fetch has been or is about to be satisfied without us
+    // scrolling anything.
+    const rect = sentinel.getBoundingClientRect ? sentinel.getBoundingClientRect() : null;
+    if (!rect) return false;
+    const withinView = rect.top < window.innerHeight && rect.bottom > 0;
+    return withinView;
   }
 
   function runLookahead() {

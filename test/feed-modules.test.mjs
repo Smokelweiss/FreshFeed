@@ -244,17 +244,38 @@ M.schedulePrefetch()
 await advance(60)
 check('full buffer: no request issued', sentinelEl.scrollCalls === 0, 'calls=' + sentinelEl.scrollCalls)
 
-resetWorld({ scrollHeight: 1400, scrollTop: 0 })
-M.schedulePrefetch()
-await advance(30)
-check('thin buffer at scrollTop=0: requests without user scrolling', sentinelEl.scrollCalls > 0, 'calls=' + sentinelEl.scrollCalls)
+// A thin buffer must trigger a request on its own, with no user scrolling and no
+// page movement. The request goes through YouTube's own API, not a scroll.
+let apiCalls = []
+function fakeApi() {
+  apiCalls = []
+  return { reloadContinuationItems: () => apiCalls.push('reload'), handleAppendContinuationItemsAction: () => apiCalls.push('append') }
+}
 
 resetWorld({ scrollHeight: 1400, scrollTop: 0 })
+gridEl.api = fakeApi()
+M.schedulePrefetch()
+await advance(30)
+check('thin buffer at scrollTop=0: requests via the API without user scrolling',
+  apiCalls.length > 0, 'api calls=' + apiCalls.length)
+check('...and never scrolled the page', sentinelEl.scrollCalls === 0, 'scrollCalls=' + sentinelEl.scrollCalls)
+
+// With no API available and the sentinel off screen, a round must simply wait
+// rather than scrolling the user down to it.
+resetWorld({ scrollHeight: 1400, scrollTop: 0 })
+gridEl.api = undefined
+M.schedulePrefetch()
+await advance(120)
+check('no API + off-screen sentinel: waits instead of scrolling', sentinelEl.scrollCalls === 0, 'scrollCalls=' + sentinelEl.scrollCalls)
+
+resetWorld({ scrollHeight: 1400, scrollTop: 0 })
+gridEl.api = fakeApi()
 M.schedulePrefetch()
 setTimeout(() => { world.cards.push(makeEl('ytd-rich-item-renderer', { matches: ['ytd-rich-item-renderer'] })) }, 60)
 await advance(500)
 check('slow-but-successful round does not exhaust the budget', true)
-check('round after progress was requested again', sentinelEl.scrollCalls >= 2, 'calls=' + sentinelEl.scrollCalls)
+check('round after progress was requested again', apiCalls.length >= 2, 'api calls=' + apiCalls.length)
+gridEl.api = undefined
 
 resetWorld({ scrollHeight: 1400, scrollTop: 0, sentinel: null })
 M.schedulePrefetch()
@@ -369,6 +390,29 @@ for (let i = 0; i < 6; i++) {
 // The module gives up after 3 consecutive presses that deliver nothing, so the
 // cap is exactly that: 6 opportunities must not become 6 presses.
 check('unproductive presses stop at the cap of 3', world.clicks === 3, 'clicks=' + world.clicks + ' from 6 opportunities')
+
+// The old fallback used scrollIntoView on the sentinel, which moved the user's
+// viewport. That must never happen: the user did not ask to be moved.
+const sentinelScrolls = []
+sentinelEl.scrollIntoView = function () { sentinelScrolls.push(1) }
+sentinelEl.getBoundingClientRect = () => ({ top: 99999, bottom: 100000, height: 1, width: 1 })
+
+resetWorld({ scrollHeight: 1400, scrollTop: 0 })
+gridEl.api = undefined
+M.schedulePrefetch()
+await advance(120)
+check('never scrolls the sentinel into view', sentinelScrolls.length === 0, 'scrollIntoView calls=' + sentinelScrolls.length)
+check('does not count an off-screen sentinel as a request', sentinelEl.scrollCalls === 0)
+
+// When the sentinel is already on screen, no scrolling is needed either.
+resetWorld({ scrollHeight: 1400, scrollTop: 0 })
+gridEl.api = undefined
+sentinelEl.getBoundingClientRect = () => ({ top: 100, bottom: 160, height: 60, width: 60 })
+sentinelScrolls.length = 0
+M.schedulePrefetch()
+await advance(120)
+check('still never scrolls, even with sentinel on screen', sentinelScrolls.length === 0, 'scrollIntoView calls=' + sentinelScrolls.length)
+sentinelEl.getBoundingClientRect = () => ({ top: 99999, bottom: 100000, height: 1, width: 1 })
 
 console.log('\n=== ' + pass + ' passed, ' + fail + ' failed ===')
 process.exit(fail ? 1 : 0)
