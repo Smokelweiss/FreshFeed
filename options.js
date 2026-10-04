@@ -99,7 +99,7 @@
     hideSurveys: "Surveys & upsell popups",
     hideGeneratedShelves: "Generated topic shelves",
     endlessFeed: "Endless feed",
-    feedLookahead: "Smooth scroll (lookahead)",
+    feedLookahead: "Smooth scroll (background preload)",
     filterUploadDate: "Upload date",
     filterDuration: "Duration"
   };

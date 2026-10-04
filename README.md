@@ -21,6 +21,34 @@ servers.
 - Updates subscriptions immediately when you subscribe or unsubscribe.
 - Imports and exports blacklist entries as plain text, JSON, or CSV.
 - Keeps working with large subscription lists using Firefox local storage.
+- **Smooth scroll** asks YouTube for more rows in the background before you reach
+  the end of the feed, so the feed keeps flowing after videos get hidden.
+- **Endless feed** detects that YouTube has genuinely run out of feed, refills
+  it, and restores your scroll position.
+
+### How feed loading works
+
+Both feed features drive **YouTube's own continuation mechanism** — the same
+element and the same internal API YouTube's own scroll handler uses. FreshFeed
+never fabricates feed content and never calls YouTube's private InnerTube API.
+
+That is a deliberate constraint, not a stylistic one. The earlier
+implementation posted to `youtubei/v1/browse` and pasted hand-built cards into
+the grid. It could not work from a content script, and the attempts were
+verified dead against the live site:
+
+- the request needs a `SAPISIDHASH` header, but `SAPISID` is `HttpOnly`, so
+  `document.cookie` never contains it and no `Authorization` header can be built;
+- YouTube answers an unfingerprinted InnerTube call with a ~112 KB shell of
+  ~440 nodes containing **zero** video renderers and **zero** continuation
+  tokens, so there is no content to extract;
+- a hand-built `<ytd-rich-item-renderer>` is re-rendered by Polymer's own
+  template, so appended cards appeared blank even when data did arrive.
+
+The feed is finite, so "endless" means "never dead-ends while you scroll": the
+recovery refills the feed and puts you back where you were. It acts only on the
+home feed, never while you are watching something, and a budget in
+`sessionStorage` caps it so it cannot reload forever.
 
 ## Quick start
 
@@ -96,6 +124,22 @@ Temporary add-ons are removed when Firefox restarts.
 3. Select `manifest.json` or the signed `.xpi` package.
 
 Temporary add-ons are removed when Firefox restarts.
+
+## Tests
+
+```sh
+node test/feed-modules.test.mjs
+```
+
+The feed-loading tests extract the shipped `content.js` module and run it against
+a fake DOM and a fake clock, so they exercise the code that actually ships rather
+than a re-typed copy of it. They cover the decisions that used to be wrong: a
+thin buffer must trigger a request without any user scrolling, a slow YouTube
+must not be mistaken for a dead end, a feed with a continuation element must not
+be treated as exhausted, and the recovery must stay bounded across reloads.
+
+Run it from the repository root — it reads `content.js` relative to the
+working directory.
 
 ## Privacy
 

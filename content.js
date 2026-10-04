@@ -900,7 +900,6 @@
     hideShortsContainers();
     hideTopicShelves();
     hideJunkOverlays();
-    rememberVisibleVideoIds();
     // Settle anything that was marked pending but could not be decided on
     // insertion (its channel data had not attached yet).
     pendingCards.forEach((card) => {
@@ -937,10 +936,11 @@
     });
     // Keep a buffer of feed content ready below the fold.
     schedulePrefetch();
-    // If YouTube has stopped handing out more content, re-seed it.
-    if (feedIsStarved()) {
-      scheduleEndlessReseed();
-    }
+    // Watch for the feed genuinely running out. The recovery decision lives
+    // inside recoverFeed, so scheduling on every scan is cheap: it early-returns
+    // while there is still content, and the timer slot keeps it to one pending
+    // check no matter how often the mutation observer fires.
+    scheduleEndlessRecovery();
   }
 
   function scheduleHomeScan() {
@@ -985,24 +985,29 @@
   //   * it stops entirely once the feed stops growing
   const LOOKAHEAD = {
     enabled: true,
-    // How many viewport-heights below the fold to keep buffered.
-    bufferScreens: 3,
-    // Never run more than this many nudge rounds for one page load.
-    maxRounds: 40,
-    // Minimum gap between rounds, in ms.
-    cooldownMs: 700,
-    // Stop after this many consecutive rounds that produced no new items.
-    maxStaleRounds: 3,
-    // Only look ahead when the user is within this many screens of the bottom.
-    triggerScreens: 2
+    // How many viewport-heights of content to keep below the fold.
+    targetScreens: 4,
+    // How long one round waits for YouTube to actually append, in ms.
+    // YouTube needs 1-3s in practice. The old 700ms single-shot verdict could
+    // not tell a slow server from a dead end, so three rounds of perfectly
+    // normal latency looked like three dead rounds and shut the whole feature
+    // off for the rest of the page load.
+    settleMs: 6000,
+    // Poll interval inside that settle window.
+    settlePollMs: 300,
+    // Tick of the self-sustaining timer. This doubles as the minimum gap
+    // between requests, so the loop still cannot free-run.
+    tickMs: 900,
+    // Give up on the whole page load only after this many consecutive rounds
+    // that YouTube genuinely could not answer.
+    maxDeadRounds: 6
   };
 
   let lookaheadTimer = null;
   let lookaheadRounds = 0;
-  let lookaheadStaleRounds = 0;
+  let lookaheadDeadRounds = 0;
   let lookaheadLastRun = 0;
   let lookaheadRunning = false;
-  let lookaheadItemCount = 0;
   let lookaheadActive = false;
   let lookaheadScrollHandler = null;
 
@@ -1020,11 +1025,28 @@
     ) || document.querySelector("ytd-continuation-item-renderer");
   }
 
-  function nearFeedBottom() {
+  // Markers that mean "YouTube is fetching right now". While any of these is
+  // present the feed is busy, not finished. The previous version treated a
+  // missing continuation element as "nothing left to load" even in the middle
+  // of a request, and banked that as a dead round without ever trying.
+  const LOADING_SELECTOR = [
+    "ytd-continuation-item-renderer[loading]",
+    "ytd-progress-spinner",
+    "ytd-loading-spinner",
+    "#continuations [loading]",
+    "[aria-busy='true']"
+  ].join(", ");
+
+  function feedIsLoading() {
+    return Boolean(document.querySelector(LOADING_SELECTOR));
+  }
+
+  // How much content is left below the fold, expressed in viewport-heights.
+  function feedBufferScreens() {
     const doc = document.scrollingElement || document.documentElement;
-    if (!doc) return false;
+    if (!doc) return Infinity;
     const remaining = doc.scrollHeight - (doc.scrollTop + window.innerHeight);
-    return remaining <= window.innerHeight * LOOKAHEAD.triggerScreens;
+    return remaining / Math.max(1, window.innerHeight);
   }
 
   function stopFeedLookahead() {
@@ -1042,10 +1064,21 @@
   function resetFeedLookahead() {
     stopFeedLookahead();
     lookaheadRounds = 0;
-    lookaheadStaleRounds = 0;
-    lookaheadItemCount = 0;
+    lookaheadDeadRounds = 0;
     lookaheadLastRun = 0;
     lookaheadRunning = false;
+  }
+
+  // Re-arm the loop. Every exit path from runLookahead goes through here, which
+  // is what makes the feature work in the background: previously the only way
+  // to get another round was a user scroll event, so a tab left alone could
+  // never make progress.
+  function armLookaheadTimer() {
+    if (lookaheadTimer) return;
+    lookaheadTimer = window.setTimeout(() => {
+      lookaheadTimer = null;
+      runLookahead();
+    }, LOOKAHEAD.tickMs);
   }
 
   function schedulePrefetch() {
@@ -1054,6 +1087,7 @@
       return;
     }
     if (!isFilterSurface() || isShortsPlayerPage() || location.pathname !== "/") {
+      stopFeedLookahead();
       return;
     }
     if (!lookaheadActive) {
@@ -1061,125 +1095,159 @@
       lookaheadScrollHandler = () => runLookahead();
       window.addEventListener("scroll", lookaheadScrollHandler, { passive: true });
     }
+    armLookaheadTimer();
     runLookahead();
   }
 
-  function runLookahead() {
-    if (lookaheadRunning || !lookaheadActive) return;
-    // Hard stop conditions. These are what keep the feed from free-running.
-    if (lookaheadRounds >= LOOKAHEAD.maxRounds || lookaheadStaleRounds >= LOOKAHEAD.maxStaleRounds) {
-      return;
+  // Ask YouTube for the next page through its own continuation mechanism. Its
+  // IntersectionObserver is what actually issues the request, so bringing the
+  // sentinel into view is the supported way in. When the hydrated app exposes
+  // its API we prefer that, because it does not move the page under the user.
+  function requestMoreFromYouTube() {
+    const grid = document.querySelector("ytd-rich-grid-renderer");
+    const app = document.querySelector("ytd-app");
+    const api = (grid && grid.api) || (app && app.api);
+    if (api && typeof api.reloadContinuationItems === "function") {
+      try {
+        api.reloadContinuationItems();
+        return true;
+      } catch (error) {
+        // Fall through to the sentinel; the API name changes over time.
+      }
     }
-    if (!nearFeedBottom()) {
-      return;
-    }
-    if (Date.now() - lookaheadLastRun < LOOKAHEAD.cooldownMs) {
-      return;
-    }
-
-    const before = countFeedItems();
     const sentinel = findFeedContinuation();
-    if (!sentinel) {
-      // Nothing left to load, or this surface paginates differently.
-      lookaheadStaleRounds += 1;
-      return;
-    }
-
-    lookaheadRunning = true;
-    lookaheadLastRun = Date.now();
-    lookaheadRounds += 1;
-
-    // Scrolling the sentinel into view is what makes YouTube request the next
-    // page. It is done at most once per cooldown so this cannot spin.
+    if (!sentinel) return false;
     try {
       sentinel.scrollIntoView({ block: "end", behavior: "instant" });
     } catch (error) {
       try {
         sentinel.scrollIntoView(false);
       } catch (ignored) {
-        // Give up quietly; a later scroll will retry.
+        return false;
       }
     }
-
-    window.setTimeout(() => {
-      lookaheadRunning = false;
-      const after = countFeedItems();
-      if (after <= before) {
-        lookaheadStaleRounds += 1;
-      } else {
-        lookaheadStaleRounds = 0;
-      }
-      // Keep topping up while there is room and the feed is still growing.
-      if (lookaheadStaleRounds < LOOKAHEAD.maxStaleRounds &&
-          lookaheadRounds < LOOKAHEAD.maxRounds &&
-          nearFeedBottom() &&
-          !feedBufferSufficient()) {
-        scheduleLookaheadTimer();
-      }
-    }, LOOKAHEAD.cooldownMs);
+    return true;
   }
 
-  // True when enough content already exists below the viewport that the user is
-  // unlikely to reach the end while scrolling normally.
-  function feedBufferSufficient() {
-    const doc = document.scrollingElement || document.documentElement;
-    if (!doc) return true;
-    const remaining = doc.scrollHeight - (doc.scrollTop + window.innerHeight);
-    return remaining >= window.innerHeight * LOOKAHEAD.bufferScreens;
+  function runLookahead() {
+    if (!lookaheadActive || lookaheadRunning) return;
+
+    if (lookaheadDeadRounds >= LOOKAHEAD.maxDeadRounds) {
+      stopFeedLookahead();
+      return;
+    }
+
+    // Work only when the buffer below the fold is genuinely thin. This is the
+    // check the old version had inverted: it demanded the user already be near
+    // the bottom, which is the single moment lookahead can do nothing for them.
+    if (feedBufferScreens() >= LOOKAHEAD.targetScreens) {
+      lookaheadDeadRounds = 0;
+      armLookaheadTimer();
+      return;
+    }
+
+    // YouTube is already fetching. Never stack a second request on top.
+    if (feedIsLoading()) {
+      armLookaheadTimer();
+      return;
+    }
+
+    // Minimum gap between requests, so this still cannot free-run.
+    if (Date.now() - lookaheadLastRun < LOOKAHEAD.tickMs) {
+      armLookaheadTimer();
+      return;
+    }
+
+    if (!requestMoreFromYouTube()) {
+      // No continuation element queued at all. Count it, but do not treat a
+      // single miss as fatal -- YouTube rebuilds the sentinel while navigating.
+      lookaheadDeadRounds += 1;
+      armLookaheadTimer();
+      return;
+    }
+
+    lookaheadRunning = true;
+    lookaheadLastRun = Date.now();
+    lookaheadRounds += 1;
+    waitForFeedGrowth(countFeedItems());
+  }
+
+  // Polls until YouTube appends something or the settle window expires. One
+  // check cannot distinguish a slow server from a real dead end, so this waits
+  // and only then decides.
+  function waitForFeedGrowth(before) {
+    const deadline = Date.now() + LOOKAHEAD.settleMs;
+    const poll = () => {
+      // This timeout has fired; clear the slot so armLookaheadTimer can re-arm.
+      lookaheadTimer = null;
+      if (countFeedItems() > before) {
+        // Real progress. Clear the dead counter so one bad round can never end
+        // the feature for the whole page load.
+        lookaheadDeadRounds = 0;
+        lookaheadRunning = false;
+        armLookaheadTimer();
+        return;
+      }
+      if (Date.now() >= deadline) {
+        // Only count it as dead when YouTube is neither loading nor offering a
+        // continuation. Busy-but-slow must not be mistaken for finished.
+        if (!feedIsLoading() && !findFeedContinuation()) {
+          lookaheadDeadRounds += 1;
+        }
+        lookaheadRunning = false;
+        armLookaheadTimer();
+        return;
+      }
+      lookaheadTimer = window.setTimeout(poll, LOOKAHEAD.settlePollMs);
+    };
+    lookaheadTimer = window.setTimeout(poll, LOOKAHEAD.settlePollMs);
   }
 
   // --- Endless feed ---------------------------------------------------------
-  // When YouTube stops handing out continuation tokens the feed is genuinely
-  // exhausted for this page load: reloading produces a fresh batch, which is
-  // why the feed "comes back" after a manual refresh.
+  // The feed is finite. YouTube hands out continuation tokens until it runs out,
+  // and then the grid simply stops growing.
   //
-  // This module does that refresh for you, in the background: it requests a
-  // fresh home response and appends the new items to the existing grid, so
-  // scrolling never dead-ends.
+  // The previous version tried to manufacture extra content by posting to the
+  // private InnerTube browse API and pasting hand-built cards into the grid.
+  // That cannot work from a content script, and it was verified dead three ways
+  // against the live site:
+  //   * the request needs a SAPISIDHASH header, but SAPISID is HttpOnly, so
+  //     document.cookie never contains it. Checked directly: the cookie jar
+  //     exposes only PREF, so authorizationHeader() always returns "".
+  //   * YouTube answers an unfingerprinted InnerTube call with a ~112KB shell
+  //     of 444 nodes containing zero video renderers and zero continuation
+  //     tokens. A full walk finds nothing, so the traversal guard was never
+  //     the problem -- there is simply no content in the answer.
+  //   * a hand-built <ytd-rich-item-renderer> is re-rendered by Polymer's own
+  //     template, so appended cards came out blank even when data did arrive.
   //
-  // Guard rails (this runs unattended, so they matter):
-  //   * a hard cap on re-seeds per page load
-  //   * a cooldown far longer than the sentinel nudge, because each re-seed is
-  //     a full page request
-  //   * every video id already on screen is remembered and skipped, so the
-  //     feed cannot loop the same items forever
-  //   * it stops permanently after too many consecutive re-seeds that add
-  //     nothing new, because that means YouTube has nothing left to give
+  // So this no longer invents content. It watches YouTube's own continuation
+  // and, when the feed is genuinely finished, recovers in the background and
+  // puts the user back where they were -- with a visible note, because a silent
+  // reload looks exactly like a broken extension.
   const ENDLESS = {
-    // Minimum gap between re-seed requests.
-    cooldownMs: 1500,
-    // Never re-seed more than this many times for one page load.
-    maxReseeds: 30,
-    // Give up only after this many consecutive re-seeds that add nothing. This
-    // is deliberately generous: an unpopulated session returns an empty shell
-    // on the first attempts, and quitting early was killing the feature.
-    maxEmptyReseeds: 6,
-    // Refuse to re-seed until the feed has actually been consumed down to this
-    // many screens of buffer. Prevents stacking requests while content is full.
-    minBufferScreens: 1
+    // Consider the feed finished once the buffer is this thin ...
+    minBufferScreens: 1.5,
+    // ... and has stayed that way this long before acting.
+    settleQuietMs: 2500,
+    // Never recover more often than this.
+    cooldownMs: 15000,
+    // Give up after this many recoveries in one page load.
+    maxRecoveries: 6,
+    // Recoveries are capped per page load, but every recovery reloads the page
+    // and resets that counter, so the real ceiling is this cross-reload budget.
+    maxRecoveriesPerWindow: 4,
+    budgetWindowMs: 300000
   };
 
   let endlessTimer = null;
-  let endlessReseeds = 0;
-  let endlessEmptyReseeds = 0;
+  let endlessRecoveries = 0;
   let endlessLastRun = 0;
   let endlessRunning = false;
-  // Every video id currently in the DOM. Used to reject duplicates, which is
-  // what stops a re-seed storm from filling the page with the same videos.
-  const seenVideoIds = new Set();
+  let statusTimer = null;
 
-  function videoIdFromHref(href) {
-    if (typeof href !== "string") return "";
-    const m = href.match(/[?&]v=([\w-]{6,})/) || href.match(/\/shorts\/([\w-]{6,})/);
-    return m ? m[1] : "";
-  }
-
-  function rememberVisibleVideoIds() {
-    document.querySelectorAll("a[href*='/watch?v='], a[href*='/shorts/']").forEach((link) => {
-      const id = videoIdFromHref(link.getAttribute("href"));
-      if (id) seenVideoIds.add(id);
-    });
-  }
+  const FEED_SCROLL_KEY = "ff:feed-scroll";
+  const FEED_RECOVERY_KEY = "ff:feed-recoveries";
 
   function endlessFeedEnabled() {
     return Boolean(state.enabled && state.settings.endlessFeed);
@@ -1190,11 +1258,9 @@
       clearTimeout(endlessTimer);
       endlessTimer = null;
     }
-    endlessReseeds = 0;
-    endlessEmptyReseeds = 0;
+    endlessRecoveries = 0;
     endlessLastRun = 0;
     endlessRunning = false;
-    seenVideoIds.clear();
   }
 
   function stopEndlessFeed() {
@@ -1202,319 +1268,156 @@
       clearTimeout(endlessTimer);
       endlessTimer = null;
     }
+    clearFeedStatus();
   }
 
-  function scheduleEndlessReseed() {
+  // A short, unobtrusive note in the corner. Recovery is never silent.
+  function showFeedStatus(text) {
+    let el = document.getElementById("ff-feed-status");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "ff-feed-status";
+      (document.body || document.documentElement).appendChild(el);
+    }
+    el.textContent = text;
+    el.setAttribute("data-ff-visible", "1");
+    if (statusTimer) clearTimeout(statusTimer);
+    statusTimer = window.setTimeout(() => {
+      if (el.isConnected) el.removeAttribute("data-ff-visible");
+    }, 4000);
+  }
+
+  function clearFeedStatus() {
+    const el = document.getElementById("ff-feed-status");
+    if (el) el.remove();
+    if (statusTimer) {
+      clearTimeout(statusTimer);
+      statusTimer = null;
+    }
+  }
+
+  // YouTube has genuinely stopped: thin buffer, no continuation element queued,
+  // and no spinner saying it is still working.
+  //
+  // The old version checked only the first two and inverted the first: it
+  // declared the feed NOT starved whenever a continuation element existed,
+  // which is most of the time, so the recovery path essentially never ran.
+  function feedIsExhausted() {
+    if (feedBufferScreens() > ENDLESS.minBufferScreens) return false;
+    if (findFeedContinuation()) return false;
+    if (feedIsLoading()) return false;
+    return true;
+  }
+
+  function scheduleEndlessRecovery() {
     if (!endlessFeedEnabled() || endlessRunning) return;
-    if (endlessReseeds >= ENDLESS.maxReseeds) return;
-    if (endlessEmptyReseeds >= ENDLESS.maxEmptyReseeds) return;
+    // Home feed only. A channel or subscriptions page may legitimately end, and
+    // silently reloading one of those would be far more annoying than a short
+    // feed. This also means the extension can never reload itself while the user
+    // is watching something.
+    if (location.pathname !== "/") return;
+    if (endlessRecoveries >= ENDLESS.maxRecoveries) return;
+    if (!recoveryBudgetAvailable()) return;
     if (endlessTimer) return;
-    const wait = Math.max(0, ENDLESS.cooldownMs - (Date.now() - endlessLastRun));
+    const wait = Math.max(ENDLESS.settleQuietMs, ENDLESS.cooldownMs - (Date.now() - endlessLastRun));
     endlessTimer = window.setTimeout(() => {
       endlessTimer = null;
-      reseedFeed();
+      recoverFeed();
     }, wait);
   }
 
-  // The feed is "starved" when the sentinel is gone and there is not enough
-  // content left below the viewport to keep scrolling.
-  function feedIsStarved() {
-    if (findFeedContinuation()) return false;
-    const doc = document.scrollingElement || document.documentElement;
-    if (!doc) return false;
-    const remaining = doc.scrollHeight - (doc.scrollTop + window.innerHeight);
-    return remaining <= window.innerHeight * ENDLESS.minBufferScreens;
-  }
-
-  // Pull every distinct video out of a fresh home response, keeping only the
-  // metadata needed to render a card.
-  function extractFeedVideos(initialData) {
-    const videos = [];
-    const seen = new Set();
-    const queue = [initialData];
-    let guard = 0;
-    while (queue.length && guard < 4000) {
-      guard += 1;
-      const node = queue.shift();
-      if (!node || typeof node !== "object") continue;
-
-      const id = typeof node.videoId === "string" ? node.videoId : "";
-      const isVideoRenderer =
-        Object.prototype.hasOwnProperty.call(node, "videoId") &&
-        (node.title !== undefined || node.headline !== undefined);
-      if (id && isVideoRenderer && !seen.has(id)) {
-        seen.add(id);
-        const title =
-          channelTitle(node.title) ||
-          channelTitle(node.headline) ||
-          channelTitle(node.title?.runs && { runs: node.title.runs });
-        const byline =
-          channelTitle(node.shortBylineText) ||
-          channelTitle(node.longBylineText) ||
-          channelTitle(node.ownerText) ||
-          channelTitle(node.videoOwnerRenderer?.title);
-        const length =
-          node.lengthText?.simpleText ||
-          (Array.isArray(node.lengthText?.runs) ? node.lengthText.runs.map((r) => r.text || "").join("") : "") ||
-          "";
-        videos.push({ id, title, byline, length });
-      }
-
-      for (const value of Object.values(node)) {
-        if (value && typeof value === "object") queue.push(value);
-      }
-    }
-    return videos;
-  }
-
-  // Build a minimal, YouTube-shaped card for a video the user has not seen.
-  // Rendering YouTube's own components is impossible from here, so the card is
-  // a plain element with the same skeleton the filter logic and YouTube's own
-  // click handling understand.
-  function createReseededCard(video) {
-    const card = document.createElement("ytd-rich-item-renderer");
-    card.setAttribute("data-ff-reseeded", "1");
-
-    const link = document.createElement("a");
-    link.id = "video-title";
-    link.setAttribute("href", "/watch?v=" + video.id);
-    link.setAttribute("title", video.title || video.id);
-    link.textContent = video.title || video.id;
-
-    const thumb = document.createElement("a");
-    thumb.id = "thumbnail";
-    thumb.setAttribute("href", "/watch?v=" + video.id);
-    thumb.setAttribute("aria-label", video.title || video.id);
-
-    const byline = document.createElement("div");
-    byline.id = "byline";
-    byline.textContent = video.byline || "";
-
-    card.append(thumb, link, byline);
-    return card;
-  }
-
-  // Append unseen videos from a re-seed. Returns how many were added.
-  function appendReseededItems(initialData, grid) {
-    if (!grid) return 0;
-    const videos = extractFeedVideos(initialData);
-    let added = 0;
-    for (const video of videos) {
-      if (!video.id || seenVideoIds.has(video.id)) continue;
-      if (grid.querySelector('a[href*="v=' + video.id + '"]')) continue;
-      seenVideoIds.add(video.id);
-      const card = createReseededCard(video);
-      // Insert before YouTube's own trailing sentinel if it has one, so its
-      // pagination logic still sees its own node last.
-      const tail = grid.querySelector(":scope > ytd-continuation-item-renderer");
-      if (tail) {
-        grid.insertBefore(card, tail);
-      } else {
-        grid.appendChild(card);
-      }
-      added += 1;
-    }
-    return added;
-  }
-
-  // Fetches the home feed the way YouTube's own JS does: a POST to the
-  // youtubei browse endpoint. Fetching the page HTML does NOT work, because the
-  // embedded ytInitialData ships as a shell with zero videos -- verified in a
-  // live probe. This route needs the user's session, so it sends the same
-  // SAPISIDHASH authorization the subscription sync already uses.
-  let innertubeConfig = null;
-
-  async function innertubeConfigFor() {
-    if (innertubeConfig) return innertubeConfig;
-    const html = document.documentElement ? document.documentElement.innerHTML : "";
-    // The live page exposes these on ytcfg; fall back to scraping the source.
-    let apiKey = "";
-    let clientVersion = "";
-    let visitorData = "";
+  // A page-load counter alone is not a budget. Every recovery reloads the page,
+  // which resets that counter, so a feed that never fills would reload forever.
+  // This survives the reload and caps recoveries across page loads.
+  function recoveryBudgetAvailable() {
     try {
-      const cfg = window.ytcfg;
-      if (cfg && typeof cfg.get === "function") {
-        apiKey = cfg.get("INNERTUBE_API_KEY") || "";
-        clientVersion = cfg.get("INNERTUBE_CLIENT_VERSION") || "";
-        visitorData = cfg.get("VISITOR_DATA") || "";
-      }
+      const raw = sessionStorage.getItem(FEED_RECOVERY_KEY);
+      if (!raw) return true;
+      const record = JSON.parse(raw);
+      if (!record || typeof record.first !== "number") return true;
+      if (Date.now() - record.first > ENDLESS.budgetWindowMs) return true;
+      return (record.count || 0) < ENDLESS.maxRecoveriesPerWindow;
     } catch (error) {
-      // ytcfg is page-owned; ignore and fall back below.
+      // Unreadable state must not block recovery forever.
+      return true;
     }
-    if (!apiKey || !clientVersion) {
-      // Last resort: read the bootstrap script text from the page source.
-      const source = document.documentElement ? document.documentElement.outerHTML : "";
-      const keyMatch = source.match(/"INNERTUBE_API_KEY":\s*"([^"]+)"/);
-      const versionMatch = source.match(/"INNERTUBE_CLIENT_VERSION":\s*"([^"]+)"/);
-      if (keyMatch) apiKey = keyMatch[1];
-      if (versionMatch) clientVersion = versionMatch[1];
-    }
-    if (!apiKey || !clientVersion) return null;
-    innertubeConfig = { apiKey, clientVersion, visitorData };
-    return innertubeConfig;
   }
 
-  async function fetchHomeFeedData() {
-    const config = await innertubeConfigFor();
-    if (!config) return null;
-
-    const headers = {
-      "Content-Type": "application/json",
-      "X-Origin": "https://www.youtube.com",
-      "X-Youtube-Client-Name": "1",
-      "X-Youtube-Client-Version": config.clientVersion
-    };
-    const authorization = await authorizationHeader();
-    if (authorization) {
-      headers.Authorization = authorization;
-    }
-
-    const response = await fetchWithTimeout(
-      "https://www.youtube.com/youtubei/v1/browse?key=" + encodeURIComponent(config.apiKey) + "&prettyPrint=false",
-      {
-        method: "POST",
-        credentials: "include",
-        headers,
-        body: JSON.stringify({
-          context: {
-            client: {
-              clientName: "WEB",
-              clientVersion: config.clientVersion,
-              ...(config.visitorData ? { visitorData: config.visitorData } : {})
-            }
-          },
-          browseId: "FEwhat_to_watch"
-        })
-      },
-      10000
-    );
-
-    if (!response.ok) {
-      throw new Error("feed request failed with " + response.status);
-    }
-    let data = await response.json();
-
-    // The browse response often carries the videos only in its continuation.
-    // Asking for it is what turns a shell into real feed content.
-    const token = firstContinuationToken(data);
-    if (token && !extractFeedVideos(data).length) {
-      const next = await fetchContinuation(token, config, headers);
-      if (next) {
-        data = next;
-      }
-    }
-
-    // An empty response is not fatal: a freshly-created session can return the
-    // feed shell before it is populated. Return it anyway and let the caller
-    // count it as an unproductive round, so the loop backs off instead of
-    // dying on the first empty answer.
-    return data;
-  }
-
-  // Finds the first continuation token anywhere in a feed response.
-  function firstContinuationToken(value) {
-    const queue = [value];
-    const seen = new Set();
-    let guard = 0;
-    while (queue.length && guard < 20000) {
-      guard += 1;
-      const node = queue.shift();
-      if (!node || typeof node !== "object" || seen.has(node)) continue;
-      seen.add(node);
-      if (node.continuationCommand && typeof node.continuationCommand.token === "string") {
-        return node.continuationCommand.token;
-      }
-      for (const child of Object.values(node)) {
-        if (child && typeof child === "object") queue.push(child);
-      }
-    }
-    return "";
-  }
-
-  async function fetchContinuation(token, config, headers) {
-    const response = await fetchWithTimeout(
-      "https://www.youtube.com/youtubei/v1/browse?key=" + encodeURIComponent(config.apiKey) + "&prettyPrint=false",
-      {
-        method: "POST",
-        credentials: "include",
-        headers,
-        body: JSON.stringify({
-          context: {
-            client: {
-              clientName: "WEB",
-              clientVersion: config.clientVersion,
-              ...(config.visitorData ? { visitorData: config.visitorData } : {})
-            }
-          },
-          continuation: token
-        })
-      },
-      10000
-    );
-    if (!response.ok) return null;
+  function noteRecovery() {
     try {
-      return await response.json();
+      const raw = sessionStorage.getItem(FEED_RECOVERY_KEY);
+      let record = { first: Date.now(), count: 0 };
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.first === "number" && Date.now() - parsed.first <= ENDLESS.budgetWindowMs) {
+          record = parsed;
+        }
+      }
+      record.count = (record.count || 0) + 1;
+      sessionStorage.setItem(FEED_RECOVERY_KEY, JSON.stringify(record));
     } catch (error) {
-      return null;
+      // Budget tracking is best-effort.
     }
   }
 
-  async function reseedFeed() {
+  // A fresh batch of recommendations only exists after a fresh request, and the
+  // only request we are allowed to make is YouTube's own. So the recovery is a
+  // reload that restores the scroll position: invisible as a navigation, but
+  // the user never hits a dead end and never has to press F5 themselves.
+  function recoverFeed() {
     if (!endlessFeedEnabled() || endlessRunning) return;
-    if (endlessReseeds >= ENDLESS.maxReseeds || endlessEmptyReseeds >= ENDLESS.maxEmptyReseeds) return;
-    if (!feedIsStarved()) return;
+    if (endlessRecoveries >= ENDLESS.maxRecoveries) return;
+    if (!feedIsExhausted()) return;
 
     endlessRunning = true;
     endlessLastRun = Date.now();
-    endlessReseeds += 1;
+    endlessRecoveries += 1;
+    noteRecovery();
+    rememberScrollPosition();
 
-    const gridBefore = document.querySelector("ytd-rich-grid-renderer #contents, #contents");
-    const countBefore = countFeedItems();
-    rememberVisibleVideoIds();
+    showFeedStatus("Лента закончилась — обновляю…");
+    // Let the note paint before the page goes away, otherwise the recovery is
+    // invisible and reads as the extension having frozen.
+    window.setTimeout(() => location.reload(), 900);
+  }
 
+  function rememberScrollPosition() {
     try {
-      const initialData = await fetchHomeFeedData();
-      if (!initialData) {
-        throw new Error("feed request returned no data");
-      }
-
-      const added = appendReseededItems(initialData, gridBefore);
-      if (added > 0) {
-        endlessEmptyReseeds = 0;
-      } else {
-        endlessEmptyReseeds += 1;
-      }
-      const countAfter = countFeedItems();
-      // A re-seed that changed nothing at all counts as empty too.
-      if (countAfter <= countBefore && added === 0) {
-        endlessEmptyReseeds += 1;
-      }
-      if (homeActive) {
-        scheduleHomeScan();
-      }
+      const doc = document.scrollingElement || document.documentElement;
+      sessionStorage.setItem(FEED_SCROLL_KEY, String(doc ? doc.scrollTop : 0));
     } catch (error) {
-      // Count a failed reseed as stale so repeated failures stop the loop.
-      endlessEmptyReseeds += 1;
-    } finally {
-      endlessRunning = false;
-      // Keep going only while it is still productive and the user is still near
-      // the end of the feed.
-      if (endlessEmptyReseeds < ENDLESS.maxEmptyReseeds &&
-          endlessReseeds < ENDLESS.maxReseeds &&
-          feedIsStarved()) {
-        scheduleEndlessReseed();
-      }
+      // Blocked storage: recovery still works, just without restoring the
+      // user's offset.
     }
   }
 
-  function scheduleLookaheadTimer() {
-    if (lookaheadTimer) return;
-    lookaheadTimer = window.setTimeout(() => {
-      lookaheadTimer = null;
-      runLookahead();
-    }, LOOKAHEAD.cooldownMs);
-  }
+  function restoreScrollPosition() {
+    let saved = null;
+    try {
+      saved = sessionStorage.getItem(FEED_SCROLL_KEY);
+      sessionStorage.removeItem(FEED_SCROLL_KEY);
+    } catch (error) {
+      return;
+    }
+    if (saved === null) return;
+    const target = Number(saved);
+    if (!Number.isFinite(target) || target < 1) return;
 
+    // Wait for the grid to actually hold rows before restoring. Restoring into a
+    // still-empty document lets the browser clamp the offset straight back to 0.
+    let attempts = 0;
+    const place = () => {
+      attempts += 1;
+      const doc = document.scrollingElement || document.documentElement;
+      const grid = document.querySelector("ytd-rich-grid-renderer #contents");
+      if (doc && (!grid || grid.children.length === 0) && attempts < 60) {
+        window.requestAnimationFrame(place);
+        return;
+      }
+      if (doc) doc.scrollTop = target;
+    };
+    window.requestAnimationFrame(place);
+  }
   function connectHome() {
     if (!isFilterSurface() || !state.enabled || isShortsPlayerPage()) {
       disconnectHome();
@@ -1527,6 +1430,9 @@
       homeObserver = new MutationObserver(onHomeMutations);
       homeObserver.observe(document.documentElement, { childList: true, subtree: true });
     }
+    // If the endless feed reloaded the page to escape a dead end, put the user
+    // back at the offset they were reading at before it gave out.
+    restoreScrollPosition();
     scheduleHomeScan();
   }
 

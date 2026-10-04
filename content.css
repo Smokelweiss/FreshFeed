@@ -88,3 +88,35 @@
     transform: rotate(360deg);
   }
 }
+
+/* Endless feed recovery note. Shown only while the feed is being refilled, so a
+   background reload never looks like the extension has frozen. */
+#ff-feed-status {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483000;
+  max-width: 320px;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 8px;
+  color: #fff;
+  background: rgba(20, 20, 20, .94);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, .35);
+  font: 14px/1.35 Arial, sans-serif;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity .18s ease, transform .18s ease;
+}
+
+#ff-feed-status[data-ff-visible="1"] {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #ff-feed-status {
+    transition: none;
+  }
+}
