@@ -66,6 +66,7 @@
   const channelKeys = ["ids", "handles", "customUrls", "names"];
   const allStorageKeys = [
     "channels", "blockedChannels", "enabled", "syncedAt", "syncProgress", "syncPending", "lastSyncResult",
+    "feedDiag",
     ...Object.keys(settingControls), ...Object.keys(numericControls), ...Object.keys(selectControls)
   ];
   const count = document.getElementById("count");
@@ -272,6 +273,59 @@
     render(await browser.storage.local.get(allStorageKeys));
   }
 
+  // Plain-text report of what the extension actually saw on the page. The two
+  // feed features could not be verified from the development browser, because
+  // YouTube never hydrates its rich grid there, so every claim about why they
+  // failed was an inference. This is the measurement instead.
+  function renderDiagnostics(data) {
+    const lines = [];
+    lines.push(data.lastSyncResult || "No sync details.");
+    lines.push("");
+    lines.push("=== Feed features (observed on the real page) ===");
+
+    const d = data.feedDiag;
+    if (!d || !d.updatedAt) {
+      lines.push("Nothing observed yet. Open the YouTube home page, scroll it,");
+      lines.push("then reopen this tab. If this stays empty the content script");
+      lines.push("is not running, which is a different problem.");
+      return lines.join("\n");
+    }
+
+    const when = new Date(d.updatedAt).toLocaleString();
+    const yes = (v) => (v ? "yes" : "no");
+    lines.push("observed: " + when + " on " + (d.page || "?"));
+    lines.push("");
+    lines.push("Page");
+    lines.push("  cards on feed      : " + d.cards);
+    lines.push("  buffer below fold  : " + d.bufferScreens + " screens");
+    lines.push("  continuation node  : " + yes(d.sentinel) + (d.sentinelInView ? " (on screen)" : " (off screen)"));
+    lines.push("  rich grid present  : " + yes(d.gridPresent));
+    lines.push("  grid.api present   : " + yes(d.gridApiPresent));
+    lines.push("  methods on grid    : " + ((d.methodsOnGrid || []).join(", ") || "none"));
+    lines.push("  methods on api     : " + ((d.methodsOnApi || []).join(", ") || "none"));
+    lines.push("");
+    lines.push("Smooth scroll");
+    lines.push("  rounds run         : " + d.rounds);
+    lines.push("  requests issued    : " + ((d.requests || []).join(", ") || "none"));
+    lines.push("  times feed grew    : " + d.growthSeen);
+    lines.push("  dead rounds        : " + d.deadRounds);
+    lines.push("  switched off       : " + yes(d.stopped));
+    if (d.stoppedBecause) lines.push("  why off            : " + d.stoppedBecause);
+    lines.push("");
+    lines.push("Endless feed");
+    lines.push("  feed seen exhausted: " + yes(d.exhausted));
+    lines.push("  reload button found: " + (d.reloadButton ? '"' + d.reloadButton + '"' : "no"));
+    lines.push("  presses            : " + d.presses);
+    lines.push("  presses that grew  : " + d.pressesThatGrew);
+    lines.push("  gave up            : " + yes(d.gaveUp));
+    lines.push("");
+    lines.push("Subscription sync");
+    lines.push("  channels           : " + d.syncChannels);
+    lines.push("  reported partial   : " + yes(d.syncPartial));
+    lines.push("  pages unavailable  : " + d.syncSkippedPages);
+    return lines.join("\n");
+  }
+
   function render(data) {
     const settings = settingsOf(data);
     enabledControl.checked = data.enabled !== false;
@@ -304,7 +358,7 @@
     progressWrap.hidden = !data.syncProgress;
     if (data.syncProgress) progressText.textContent = "Syncing… found " + (data.syncProgress.count || 0);
     sync.disabled = Boolean(data.syncProgress || data.syncPending);
-    result.textContent = data.lastSyncResult || "No sync details.";
+    result.textContent = renderDiagnostics(data);
     blacklistCount.textContent = String(channelCount(blockedChannels));
     renderChannelList(subscribedList, channels, null, 200);
     renderChannelList(blacklistList, blockedChannels, removeBlacklistEntry, 200);

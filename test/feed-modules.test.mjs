@@ -36,6 +36,7 @@ function makeEl(tag, opts = {}) {
     clicks: 0,
     _matches: opts.matches || [],
     _children: opts.children || [],
+    style: { transform: '' },
     matches(sel) { return this._matches.includes(sel) },
     querySelectorAll(sel) {
       // A container exposes only the fake buttons it was given.
@@ -164,12 +165,17 @@ const CARD_SELECTOR = 'ytd-rich-item-renderer'
 const isFilterSurface = () => world.pathname === '/'
 const isShortsPlayerPage = () => false
 
+const diagWrites = []
+const browserStub = {
+  storage: { local: { set: (o) => { diagWrites.push(o); return Promise.resolve(); } } }
+}
+
 const factory = new Function(
-  'CARD_SELECTOR', 'state', 'isFilterSurface', 'isShortsPlayerPage',
+  'CARD_SELECTOR', 'state', 'isFilterSurface', 'isShortsPlayerPage', 'browser',
   'document', 'window', 'sessionStorage', 'location', 'MutationObserver',
-  MODULE + '\nreturn { LOOKAHEAD, ENDLESS, schedulePrefetch, stopFeedLookahead, resetFeedLookahead, resetEndlessFeed, stopEndlessFeed, feedIsExhausted, scheduleEndlessRecovery, feedBufferScreens, requestMoreFromYouTube, armLookaheadTimer, feedIsLoading, countFeedItems, findFeedReloadButton, pressFeedReloadButton };'
+  MODULE + '\nreturn { LOOKAHEAD, ENDLESS, diag, schedulePrefetch, stopFeedLookahead, resetFeedLookahead, resetEndlessFeed, stopEndlessFeed, feedIsExhausted, scheduleEndlessRecovery, feedBufferScreens, requestMoreFromYouTube, armLookaheadTimer, feedIsLoading, countFeedItems, findFeedReloadButton, pressFeedReloadButton, snapshotPage };'
 )
-const M = factory(CARD_SELECTOR, state, isFilterSurface, isShortsPlayerPage,
+const M = factory(CARD_SELECTOR, state, isFilterSurface, isShortsPlayerPage, browserStub,
   globalThis.document, globalThis.window, globalThis.sessionStorage, globalThis.location, globalThis.MutationObserver)
 
 M.LOOKAHEAD.tickMs = 10
@@ -408,27 +414,57 @@ scopeRoots = [makeScope('ytd-rich-grid-renderer')]
 check('finds the button directly in the grid', M.findFeedReloadButton() === inGrid)
 
 // The old fallback used scrollIntoView on the sentinel, which moved the user's
-// viewport. That must never happen: the user did not ask to be moved.
+// viewport, and then a regression replaced it with a check that did nothing at
+// all. The contract now: fire a real trigger, never scroll the page.
 const sentinelScrolls = []
 sentinelEl.scrollIntoView = function () { sentinelScrolls.push(1) }
+sentinelEl.style = { transform: '' }
 sentinelEl.getBoundingClientRect = () => ({ top: 99999, bottom: 100000, height: 1, width: 1 })
 
 resetWorld({ scrollHeight: 1400, scrollTop: 0 })
 gridEl.api = undefined
-M.schedulePrefetch()
-await advance(120)
-check('never scrolls the sentinel into view', sentinelScrolls.length === 0, 'scrollIntoView calls=' + sentinelScrolls.length)
-check('does not count an off-screen sentinel as a request', sentinelEl.scrollCalls === 0)
+diagWrites.length = 0
+const fired = M.requestMoreFromYouTube()
+check('nudge strategy fires even with the sentinel off screen', fired === 'nudge', 'strategy=' + fired)
+check('nudge uses a transform, not a scroll', sentinelEl.style.transform !== '' && sentinelScrolls.length === 0,
+  'transform=' + sentinelEl.style.transform + ' scrollCalls=' + sentinelScrolls.length)
+await advance(1000)
+check('transform is restored afterwards', sentinelEl.style.transform === '', 'transform=' + JSON.stringify(sentinelEl.style.transform))
+check('page scroll position untouched by the nudge', world.scrollTop === 0, 'scrollTop=' + world.scrollTop)
 
-// When the sentinel is already on screen, no scrolling is needed either.
+// A zero-argument continuation method on the api object is preferred when it exists.
 resetWorld({ scrollHeight: 1400, scrollTop: 0 })
+let apiHits = []
+gridEl.api = { reloadContinuationItems: () => apiHits.push('reload') }
+diagWrites.length = 0
+const fired2 = M.requestMoreFromYouTube()
+check('prefers a real continuation method when present', fired2 === 'call:reloadContinuationItems', 'strategy=' + fired2)
+check('the method was actually called', apiHits.length === 1)
+
+// Handlers that require a parsed response must NOT be called blindly.
+resetWorld({ scrollHeight: 1400, scrollTop: 0 })
+let appendHits = 0
+gridEl.api = { handleAppendContinuationItemsAction: function (response) { appendHits++; return response } }
+diagWrites.length = 0
+const fired3 = M.requestMoreFromYouTube()
+check('never calls a handler that needs an argument', appendHits === 0, 'calls=' + appendHits)
+check('falls back to the nudge instead', fired3 === 'nudge', 'strategy=' + fired3)
 gridEl.api = undefined
-sentinelEl.getBoundingClientRect = () => ({ top: 100, bottom: 160, height: 60, width: 60 })
-sentinelScrolls.length = 0
+
+// Diagnostics must actually record something, so a diagnosis stops being a guess.
+resetWorld({ scrollHeight: 1400, scrollTop: 0 })
+diagWrites.length = 0
+M.snapshotPage()
 M.schedulePrefetch()
-await advance(120)
-check('still never scrolls, even with sentinel on screen', sentinelScrolls.length === 0, 'scrollIntoView calls=' + sentinelScrolls.length)
-sentinelEl.getBoundingClientRect = () => ({ top: 99999, bottom: 100000, height: 1, width: 1 })
+await advance(60)
+check('diagnostics are written to storage', diagWrites.length > 0, 'writes=' + diagWrites.length)
+check('diagnostics record the methods seen on the grid', Array.isArray(M.diag.methodsOnGrid), 'api=' + JSON.stringify(M.diag.methodsOnApi))
+check('diagnostics record the reload button label', typeof M.diag.reloadButton === 'string', 'label=' + JSON.stringify(M.diag.reloadButton))
+check('diagnostics record cards and buffer', M.diag.cards > 0 && typeof M.diag.bufferScreens === 'number',
+  'cards=' + M.diag.cards + ' buffer=' + M.diag.bufferScreens)
+
+console.log('\n=== ' + pass + ' passed, ' + fail + ' failed ===')
+process.exit(fail ? 1 : 0)
 
 console.log('\n=== ' + pass + ' passed, ' + fail + ' failed ===')
 process.exit(fail ? 1 : 0)

@@ -1094,6 +1094,103 @@
     }, LOOKAHEAD.tickMs);
   }
 
+  // --- Diagnostics ----------------------------------------------------------
+  // Why this exists: the two feed features could not be verified from the
+  // development browser, because YouTube never hydrates its rich grid there
+  // (grid.api absent, no browse request, a three-card stub). Every earlier
+  // conclusion about why they failed was therefore an inference, and the
+  // inferences were wrong twice.
+  //
+  // So the extension records what it actually sees on the page the user is
+  // really using, and the options page shows it. No console, no devtools, no
+  // asking the user to type anything: open Settings, read Diagnostics.
+  const DIAG_KEY = "feedDiag";
+  const DIAG_THROTTLE_MS = 1500;
+
+  const diag = {
+    updatedAt: 0,
+    page: "",
+    cards: 0,
+    bufferScreens: 0,
+    sentinel: false,
+    sentinelInView: false,
+    gridPresent: false,
+    gridApiPresent: false,
+    methodsOnGrid: [],
+    methodsOnApi: [],
+    lookaheadOn: false,
+    rounds: 0,
+    requests: [],
+    growthSeen: 0,
+    deadRounds: 0,
+    stopped: false,
+    endlessOn: false,
+    exhausted: false,
+    reloadButton: "",
+    presses: 0,
+    pressesThatGrew: 0,
+    gaveUp: false,
+    syncChannels: 0,
+    syncPartial: false,
+    syncSkippedPages: 0
+  };
+  let diagDirty = false;
+  let diagLastWrite = 0;
+
+  function note(method, extra) {
+    if (diag.requests.length < 40) diag.requests.push(method + (extra ? ":" + extra : ""));
+    diagDirty = true;
+  }
+
+  // Which continuation entry points actually exist on this build of YouTube.
+  // The method names move between releases, so this is recorded rather than
+  // assumed, and the recorded list is what a diagnosis should be based on.
+  const CONTINUATION_CANDIDATES = [
+    "reloadContinuationItems",
+    "handleAppendContinuationItemsAction",
+    "handleReloadContinuationItemsCommand",
+    "onReloadContinuationFinish"
+  ];
+
+  function probeContinuationApi() {
+    const grid = document.querySelector("ytd-rich-grid-renderer");
+    const api = (grid && grid.api) || null;
+    diag.gridPresent = Boolean(grid);
+    diag.gridApiPresent = Boolean(api);
+    diag.methodsOnGrid = grid ? CONTINUATION_CANDIDATES.filter((n) => typeof grid[n] === "function") : [];
+    diag.methodsOnApi = api ? CONTINUATION_CANDIDATES.filter((n) => typeof api[n] === "function") : [];
+    return { grid, api };
+  }
+
+  function snapshotPage() {
+    diag.page = location.pathname;
+    diag.cards = countFeedItems();
+    diag.bufferScreens = Number(feedBufferScreens().toFixed(2));
+    const sentinel = findFeedContinuation();
+    diag.sentinel = Boolean(sentinel);
+    diag.sentinelInView = Boolean(
+      sentinel && sentinel.getBoundingClientRect &&
+      sentinel.getBoundingClientRect().top < window.innerHeight &&
+      sentinel.getBoundingClientRect().bottom > 0
+    );
+    probeContinuationApi();
+    const button = findFeedReloadButton();
+    diag.reloadButton = button
+      ? String(button.getAttribute("aria-label") || button.innerText || "").replace(/\s+/g, " ").trim().slice(0, 40)
+      : "";
+    diagDirty = true;
+  }
+
+  function flushDiag(force) {
+    if (!diagDirty && !force) return;
+    const now = Date.now();
+    if (!force && now - diagLastWrite < DIAG_THROTTLE_MS) return;
+    diagLastWrite = now;
+    diagDirty = false;
+    diag.updatedAt = now;
+    browser.storage.local.set({ [DIAG_KEY]: { ...diag } }).catch(() => {});
+  }
+
   function schedulePrefetch() {
     if (!state.enabled || !state.settings.feedLookahead || !LOOKAHEAD.enabled) {
       stopFeedLookahead();
@@ -1112,51 +1209,76 @@
     runLookahead();
   }
 
-  // Ask YouTube for the next page without ever moving the page.
+  // Ask YouTube for the next page. Returns the strategy that fired, or null.
   //
-  // The preferred route is the app's own API. The fallback deliberately does NOT
-  // scroll the sentinel into view: that is how YouTube triggers its own fetch,
-  // but scrollIntoView also moves the user's viewport, so on a short buffer it
-  // would yank them to the bottom of the feed unprompted. An extension that
-  // moves the page is an extension the user stops trusting.
+  // A regression worth recording: this used to fall back to
+  // sentinel.scrollIntoView(), which is what actually makes YouTube fetch. That
+  // was removed because it moves the user's viewport, and what replaced it only
+  // *checked* whether the sentinel was on screen and then did nothing. So the
+  // fallback reported success, waited, saw no growth, and after six rounds shut
+  // the feature off. Both feed features were dead because of that, not because
+  // of anything YouTube did.
   //
-  // So when there is no API to call, a round only proceeds if the sentinel is
-  // already at the edge of the viewport -- i.e. the user has scrolled there
-  // themselves. Otherwise we wait for the next tick and try the API again.
+  // Strategy order:
+  //   1. A no-argument continuation method on the grid or on its api object.
+  //      Only called when fn.length === 0, because the handlers that take a
+  //      parsed response cannot be fed a guessed argument.
+  //   2. Nudge the sentinel into the viewport with a transform.
+  //
+  // On the transform: YouTube loads the next page from an IntersectionObserver
+  // on the continuation element, and that observer fires on the element's
+  // geometry crossing the viewport -- not on the scroll position itself. A
+  // transform moves the element without touching layout, scrollTop or
+  // scrollHeight, so the observer fires and the page does not move. The style is
+  // restored right after. scrollIntoView is not used at all: it moves the user.
   function requestMoreFromYouTube() {
-    const grid = document.querySelector("ytd-rich-grid-renderer");
-    const app = document.querySelector("ytd-app");
-    const api = (grid && grid.api) || (app && app.api);
-    if (api) {
-      for (const name of ["reloadContinuationItems", "handleAppendContinuationItemsAction"]) {
-        if (typeof api[name] === "function") {
-          try {
-            api[name]();
-            return true;
-          } catch (error) {
-            // Fall through to the next candidate.
-          }
+    const { grid, api } = probeContinuationApi();
+
+    for (const holder of [api, grid]) {
+      if (!holder) continue;
+      for (const name of CONTINUATION_CANDIDATES) {
+        if (typeof holder[name] !== "function") continue;
+        // Only safe to call with no arguments.
+        if (holder[name].length !== 0) continue;
+        try {
+          holder[name]();
+          note("call:" + name);
+          return "call:" + name;
+        } catch (error) {
+          note("call-failed:" + name);
         }
       }
     }
 
     const sentinel = findFeedContinuation();
-    if (!sentinel) return false;
+    if (!sentinel) return null;
 
-    // Only act if the sentinel is already visible, so the IntersectionObserver
-    // that triggers the fetch has been or is about to be satisfied without us
-    // scrolling anything.
-    const rect = sentinel.getBoundingClientRect ? sentinel.getBoundingClientRect() : null;
-    if (!rect) return false;
-    const withinView = rect.top < window.innerHeight && rect.bottom > 0;
-    return withinView;
+    const previous = sentinel.style.transform;
+    try {
+      sentinel.style.transform = "translateY(-100vh)";
+      note("nudge");
+    } catch (error) {
+      note("nudge-failed");
+      return null;
+    }
+    window.setTimeout(() => {
+      if (sentinel.isConnected) sentinel.style.transform = previous;
+    }, 900);
+    return "nudge";
   }
 
   function runLookahead() {
     if (!lookaheadActive || lookaheadRunning) return;
 
+    diag.lookaheadOn = true;
+    snapshotPage();
+
     if (lookaheadDeadRounds >= LOOKAHEAD.maxDeadRounds) {
       stopFeedLookahead();
+      diag.stopped = true;
+      diag.stoppedBecause = "maxDeadRounds=" + lookaheadDeadRounds +
+        " requests=" + (diag.requests.join(",") || "none");
+      flushDiag(true);
       return;
     }
 
@@ -1182,16 +1304,19 @@
     }
 
     if (!requestMoreFromYouTube()) {
-      // No continuation element queued at all. Count it, but do not treat a
-      // single miss as fatal -- YouTube rebuilds the sentinel while navigating.
+      // Nothing to trigger: no continuation element and no callable method.
       lookaheadDeadRounds += 1;
       armLookaheadTimer();
+      flushDiag();
       return;
     }
 
     lookaheadRunning = true;
     lookaheadLastRun = Date.now();
     lookaheadRounds += 1;
+    diag.rounds = lookaheadRounds;
+    diag.deadRounds = lookaheadDeadRounds;
+    flushDiag();
     waitForFeedGrowth(countFeedItems());
   }
 
@@ -1208,7 +1333,10 @@
         // the feature for the whole page load.
         lookaheadDeadRounds = 0;
         lookaheadRunning = false;
+        diag.growthSeen += 1;
+        diag.deadRounds = 0;
         armLookaheadTimer();
+        flushDiag();
         return;
       }
       if (Date.now() >= deadline) {
@@ -1218,7 +1346,9 @@
           lookaheadDeadRounds += 1;
         }
         lookaheadRunning = false;
+        diag.deadRounds = lookaheadDeadRounds;
         armLookaheadTimer();
+        flushDiag();
         return;
       }
       lookaheadTimer = window.setTimeout(poll, LOOKAHEAD.settlePollMs);
@@ -1414,7 +1544,11 @@
   function pressFeedReloadButton() {
     if (!endlessFeedEnabled() || endlessRunning) return;
     if (endlessPresses >= ENDLESS.maxPresses) return;
-    if (!feedIsExhausted()) return;
+
+    diag.endlessOn = true;
+    diag.exhausted = feedIsExhausted();
+    if (!diag.exhausted) return;
+    snapshotPage();
 
     found.button = null;
     const button = findFeedReloadButton();
@@ -1422,15 +1556,21 @@
       // YouTube offered nothing to press. Say so once and stop, rather than
       // reloading the page or hammering the site.
       endlessEmptyPresses += 1;
+      diag.gaveUp = true;
+      note("endless:no-button");
       if (endlessEmptyPresses >= 2) {
         showFeedStatus("YouTube не даёт продолжить ленту", true);
       }
+      flushDiag(true);
       return;
     }
 
     endlessRunning = true;
     endlessLastRun = Date.now();
     endlessPresses += 1;
+    diag.presses = endlessPresses;
+    note("endless:press", diag.reloadButton);
+    flushDiag();
 
     const before = countFeedItems();
     showFeedStatus("Лента обновляется…");
@@ -1450,6 +1590,9 @@
       if (after > before) {
         endlessEmptyPresses = 0;
         endlessRunning = false;
+        diag.pressesThatGrew += 1;
+        snapshotPage();
+        flushDiag();
         clearFeedStatus();
         // Top up again if there is still not enough below the fold.
         if (feedIsExhausted() || feedBufferScreens() < LOOKAHEAD.targetScreens) {
@@ -1462,7 +1605,11 @@
         // of pressing forever.
         endlessEmptyPresses += 1;
         endlessRunning = false;
+        note("endless:press-gave-nothing");
+        snapshotPage();
+        flushDiag(true);
         if (endlessEmptyPresses >= 2) {
+          diag.gaveUp = true;
           showFeedStatus("YouTube не даёт продолжить ленту", true);
         } else {
           clearFeedStatus();
@@ -2279,6 +2426,9 @@
       updateSets();
       const warning = channels.skippedPages ? " (" + channels.skippedPages + " unavailable pages skipped)" : "";
       const result = "Synchronized " + total + " channels in " + Math.floor((syncedAt - startedAt) / 1000) + "s" + warning;
+      diag.syncChannels = total;
+      diag.syncPartial = Boolean(channels.partial);
+      diag.syncSkippedPages = channels.skippedPages || 0;
       await browser.storage.local.set({
         channels,
         syncedAt,
@@ -2288,6 +2438,7 @@
         syncProgress: null,
         lastSyncResult: result
       });
+      flushDiag(true);
       showOverlay("FreshFeed: ready, " + total + " channels", false);
       removeOverlayLater();
     } catch (error) {
