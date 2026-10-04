@@ -1121,6 +1121,14 @@
     gridApiPresent: false,
     methodsOnGrid: [],
     methodsOnApi: [],
+    gridMembers: [],
+    apiMembers: [],
+    appMembers: [],
+    gridDataKeys: [],
+    gridItemsLength: null,
+    contentsChildren: null,
+    tailTags: [],
+    continuationishTags: [],
     lookaheadOn: false,
     ticks: 0,
     rounds: 0,
@@ -1157,14 +1165,91 @@
     "onReloadContinuationFinish"
   ];
 
+  // Collects every member of an object across its prototype chain. The whole
+  // point is to stop guessing names: the previous four candidates were invented,
+  // and the Diagnostics report came back with "none of those exist".
+  function allMembersOf(holder) {
+    if (!holder || typeof holder !== "object") return [];
+    const names = new Set();
+    let cursor = holder;
+    let depth = 0;
+    while (cursor && depth < 10) {
+      let current = cursor;
+      let inner = 0;
+      while (current && inner < 10) {
+        for (const key of Object.getOwnPropertyNames(current)) {
+          if (key === "constructor") continue;
+          names.add(key);
+        }
+        current = Object.getPrototypeOf(current);
+        inner += 1;
+      }
+      cursor = Object.getPrototypeOf(cursor);
+      depth += 1;
+    }
+    return Array.from(names);
+  }
+
+  const RELEVANT_MEMBER = /continu|reload|append|insert|refresh|more|load|item|purge|clear/i;
+
   function probeContinuationApi() {
     const grid = document.querySelector("ytd-rich-grid-renderer");
+    const app = document.querySelector("ytd-app");
     const api = (grid && grid.api) || null;
     diag.gridPresent = Boolean(grid);
     diag.gridApiPresent = Boolean(api);
     diag.methodsOnGrid = grid ? CONTINUATION_CANDIDATES.filter((n) => typeof grid[n] === "function") : [];
     diag.methodsOnApi = api ? CONTINUATION_CANDIDATES.filter((n) => typeof api[n] === "function") : [];
+
+    // Everything that even looks like a continuation entry point, not just the
+    // four names this file happened to guess.
+    diag.gridMembers = grid
+      ? allMembersOf(grid).filter((n) => RELEVANT_MEMBER.test(n) && typeof grid[n] === "function").slice(0, 60)
+      : [];
+    diag.apiMembers = api
+      ? allMembersOf(api).filter((n) => typeof api[n] === "function").slice(0, 60)
+      : [];
+    diag.appMembers = app
+      ? allMembersOf(app).filter((n) => /navigat|reload|refresh|pager|store|data/i.test(n) && typeof app[n] === "function").slice(0, 40)
+      : [];
+
+    // The grid's own data model, which is how items actually get added.
+    diag.gridDataKeys = [];
+    for (const key of ["data", "__data", "__dataProxy"]) {
+      const holder = grid && grid[key];
+      if (holder && typeof holder === "object") {
+        diag.gridDataKeys.push(key + ": " + Object.keys(holder).slice(0, 14).join(","));
+      }
+    }
+    const items = grid && grid.data && Array.isArray(grid.data.items) ? grid.data.items : null;
+    diag.gridItemsLength = items ? items.length : null;
+
     return { grid, api };
+  }
+
+  // What is actually at the end of the grid when the feed is finished. If
+  // YouTube renders no control there, no amount of button matching will find
+  // one, and the report should say so instead of guessing.
+  function probeFeedTail() {
+    const grid = document.querySelector("ytd-rich-grid-renderer");
+    const contents = grid && grid.querySelector("#contents");
+    diag.tailTags = [];
+    if (!contents) return;
+    const kids = Array.from(contents.children);
+    for (const kid of kids.slice(-4)) {
+      diag.tailTags.push(kid.tagName.toLowerCase() + (kid.id ? "#" + kid.id : ""));
+    }
+    diag.contentsChildren = contents.children.length;
+    // Any element anywhere whose tag or id hints at a continuation or reload.
+    diag.continuationishTags = [];
+    const all = contents.querySelectorAll("*");
+    for (let i = 0; i < all.length && diag.continuationishTags.length < 12; i++) {
+      const el = all[i];
+      const tag = el.tagName.toLowerCase();
+      if (/continu|reload|sentinel|spinner/.test(tag + " " + (el.id || ""))) {
+        diag.continuationishTags.push(tag + (el.id ? "#" + el.id : ""));
+      }
+    }
   }
 
   function snapshotPage() {
@@ -1179,6 +1264,7 @@
       sentinel.getBoundingClientRect().bottom > 0
     );
     probeContinuationApi();
+    probeFeedTail();
     const button = findFeedReloadButton();
     diag.reloadButton = button
       ? String(button.getAttribute("aria-label") || button.innerText || "").replace(/\s+/g, " ").trim().slice(0, 40)

@@ -50,6 +50,9 @@ function makeEl(tag, opts = {}) {
       return this._children.filter((c) => c._matches.includes(sel))
     },
     querySelector(sel) { return this.querySelectorAll(sel)[0] || null },
+    // probeFeedTail() reads the last children of #contents, so the fake needs a
+    // real children collection rather than the underscore-prefixed one.
+    get children() { return this._children },
     scrollIntoView() { this.scrollCalls++ },
     click() { this.clicks++; world.clicks++ },
     setAttribute(k, v) { this._attrs[k] = v },

@@ -301,8 +301,26 @@
     lines.push("  continuation node  : " + yes(d.sentinel) + (d.sentinelInView ? " (on screen)" : " (off screen)"));
     lines.push("  rich grid present  : " + yes(d.gridPresent));
     lines.push("  grid.api present   : " + yes(d.gridApiPresent));
+    lines.push("  grid items in data : " + (d.gridItemsLength === null || d.gridItemsLength === undefined ? "n/a" : d.gridItemsLength));
+    lines.push("  grid children      : " + (d.contentsChildren === null || d.contentsChildren === undefined ? "n/a" : d.contentsChildren));
     lines.push("  methods on grid    : " + ((d.methodsOnGrid || []).join(", ") || "none"));
     lines.push("  methods on api     : " + ((d.methodsOnApi || []).join(", ") || "none"));
+    lines.push("  last grid children : " + ((d.tailTags || []).join(", ") || "none"));
+    lines.push("  continuation-ish   : " + ((d.continuationishTags || []).join(", ") || "none"));
+    if ((d.gridDataKeys || []).length) {
+      d.gridDataKeys.forEach((k) => lines.push("  data " + k));
+    }
+    lines.push("");
+    lines.push("  grid members that look relevant:");
+    lines.push("      " + ((d.gridMembers || []).join(", ") || "none"));
+    if ((d.apiMembers || []).length) {
+      lines.push("  api members:");
+      lines.push("      " + d.apiMembers.join(", "));
+    }
+    if ((d.appMembers || []).length) {
+      lines.push("  app members:");
+      lines.push("      " + d.appMembers.join(", "));
+    }
     lines.push("");
     lines.push("Smooth scroll");
     lines.push("  loop ticks         : " + d.ticks);
