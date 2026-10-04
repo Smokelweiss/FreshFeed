@@ -34,10 +34,30 @@ asks for more rows when the buffer below the fold is thin rather than when the
 user happens to be scrolling, waits long enough that a slow response is not
 mistaken for a dead end, and re-arms itself so it works with the tab idle.
 
-The feed is finite, so "endless" means "never dead-ends while you scroll": when
-YouTube genuinely runs out, FreshFeed refills the feed and restores your scroll
-position. It acts only on the home feed, never while you are watching something,
-and a budget in `sessionStorage` caps it so it cannot reload forever.
+The feed is finite, so "endless" means "never dead-ends while you scroll".
+
+When YouTube runs out of continuation tokens it does not simply stop: it renders
+a **"Show more" button** at the bottom of the grid. Endless feed presses that
+button. YouTube then issues the request and renders the result with its own
+renderers, so there is nothing to fabricate and no internal API to depend on.
+
+The two earlier approaches were worse and are gone:
+
+- **Reloading the page.** It worked, and it was unacceptable: a full reload to
+  extend a list is a visible interruption that discards whatever the page was
+  doing. Removed outright — there is no `location.reload()` anywhere in the
+  extension.
+- **Appending cards built from InnerTube data.** The data is obtainable (an
+  authenticated browse returns real videos), but the rendering is not. A
+  hand-built `<ytd-rich-item-renderer>` is re-rendered by Polymer's own template
+  and comes out blank, and the grid's own append handler is minified and routes
+  through a command-keyed action map that silently ignores a raw parsed response.
+  Depending on minified internals would break without warning.
+
+If YouTube offers no button, FreshFeed says so in the corner and stops, rather
+than reloading the page or hammering the site. Three consecutive presses that
+deliver nothing end it for that page load.
+
 
 ### How subscription sync works
 

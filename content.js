@@ -1217,50 +1217,58 @@
   }
 
   // --- Endless feed ---------------------------------------------------------
-  // The feed is finite. YouTube hands out continuation tokens until it runs out,
-  // and then the grid simply stops growing.
+  // When YouTube runs out of continuation tokens on the home feed it does not
+  // just stop: it renders a "Show more" button at the bottom of the grid.
+  // Pressing that button makes YouTube fetch a fresh batch and render it with
+  // its own renderers, which is exactly what an endless feed needs to be.
   //
-  // The previous version tried to manufacture extra content by posting to the
-  // private InnerTube browse API and pasting hand-built cards into the grid.
-  // That cannot work from a content script, and it was verified dead three ways
-  // against the live site:
-  //   * the request needs a SAPISIDHASH header, but SAPISID is HttpOnly, so
-  //     document.cookie never contains it. Checked directly: the cookie jar
-  //     exposes only PREF, so authorizationHeader() always returns "".
-  //   * YouTube answers an unfingerprinted InnerTube call with a ~112KB shell
-  //     of 444 nodes containing zero video renderers and zero continuation
-  //     tokens. A full walk finds nothing, so the traversal guard was never
-  //     the problem -- there is simply no content in the answer.
-  //   * a hand-built <ytd-rich-item-renderer> is re-rendered by Polymer's own
-  //     template, so appended cards came out blank even when data did arrive.
+  // So this presses the button YouTube already offers. That is deliberately the
+  // whole implementation. The two previous attempts were worse:
   //
-  // So this no longer invents content. It watches YouTube's own continuation
-  // and, when the feed is genuinely finished, recovers in the background and
-  // puts the user back where they were -- with a visible note, because a silent
-  // reload looks exactly like a broken extension.
+  //   * Reloading the page. It works, and the user hates it: a full reload to
+  //     extend a list is a visible, jarring interruption that throws away
+  //     everything the page was doing. Removed outright.
+  //   * Appending cards built from InnerTube data. The data is obtainable --
+  //     an authenticated browse returns real videos -- but the rendering is not.
+  //     A hand-built <ytd-rich-item-renderer> is re-rendered by Polymer's own
+  //     template and comes out blank, and the grid's own append handler is
+  //     minified and routes through a command-keyed action map that silently
+  //     ignores a raw parsed response. Depending on minified internals would
+  //     break without warning.
+  //
+  // Pressing a button the user could have pressed themselves is stable, needs no
+  // internal API, and cannot fabricate anything.
   const ENDLESS = {
     // Consider the feed finished once the buffer is this thin ...
     minBufferScreens: 1.5,
     // ... and has stayed that way this long before acting.
     settleQuietMs: 2500,
-    // Never recover more often than this.
-    cooldownMs: 15000,
-    // Give up after this many recoveries in one page load.
-    maxRecoveries: 6,
-    // Recoveries are capped per page load, but every recovery reloads the page
-    // and resets that counter, so the real ceiling is this cross-reload budget.
-    maxRecoveriesPerWindow: 4,
-    budgetWindowMs: 300000
+    // Never press more often than this.
+    cooldownMs: 12000,
+    // Give up on this page load after this many presses. YouTube only offers the
+    // button when it genuinely has another batch; if pressing it stops producing
+    // items, something is wrong and retrying forever would hammer the site.
+    maxPresses: 30,
+    // How long to wait for a pressed button to actually deliver items.
+    settleMs: 8000,
+    settlePollMs: 300
   };
 
+  // What YouTube calls the reload affordance, across locales. Matched against a
+  // normalised aria-label or button text, and only on buttons inside the feed's
+  // continuation area, so an unrelated "More" elsewhere on the page is never hit.
+  const ENDLESS_RELOAD_LABELS = [
+    "show more", "load more", "more videos", "see more", "more",
+    "показать ещё", "показать еще", "ещё", "еще",
+    "загрузить ещё", "загрузить еще", "больше видео", "ещё видео"
+  ];
+
   let endlessTimer = null;
-  let endlessRecoveries = 0;
+  let endlessPresses = 0;
+  let endlessEmptyPresses = 0;
   let endlessLastRun = 0;
   let endlessRunning = false;
   let statusTimer = null;
-
-  const FEED_SCROLL_KEY = "ff:feed-scroll";
-  const FEED_RECOVERY_KEY = "ff:feed-recoveries";
 
   function endlessFeedEnabled() {
     return Boolean(state.enabled && state.settings.endlessFeed);
@@ -1271,7 +1279,8 @@
       clearTimeout(endlessTimer);
       endlessTimer = null;
     }
-    endlessRecoveries = 0;
+    endlessPresses = 0;
+    endlessEmptyPresses = 0;
     endlessLastRun = 0;
     endlessRunning = false;
   }
@@ -1284,8 +1293,9 @@
     clearFeedStatus();
   }
 
-  // A short, unobtrusive note in the corner. Recovery is never silent.
-  function showFeedStatus(text) {
+  // A short, unobtrusive note in the corner. Never silent: if the feed genuinely
+  // cannot be extended, the user is told rather than left with a dead end.
+  function showFeedStatus(text, sticky) {
     let el = document.getElementById("ff-feed-status");
     if (!el) {
       el = document.createElement("div");
@@ -1294,10 +1304,15 @@
     }
     el.textContent = text;
     el.setAttribute("data-ff-visible", "1");
-    if (statusTimer) clearTimeout(statusTimer);
-    statusTimer = window.setTimeout(() => {
-      if (el.isConnected) el.removeAttribute("data-ff-visible");
-    }, 4000);
+    if (statusTimer) {
+      clearTimeout(statusTimer);
+      statusTimer = null;
+    }
+    if (!sticky) {
+      statusTimer = window.setTimeout(() => {
+        if (el.isConnected) el.removeAttribute("data-ff-visible");
+      }, 4000);
+    }
   }
 
   function clearFeedStatus() {
@@ -1311,10 +1326,6 @@
 
   // YouTube has genuinely stopped: thin buffer, no continuation element queued,
   // and no spinner saying it is still working.
-  //
-  // The old version checked only the first two and inverted the first: it
-  // declared the feed NOT starved whenever a continuation element existed,
-  // which is most of the time, so the recovery path essentially never ran.
   function feedIsExhausted() {
     if (feedBufferScreens() > ENDLESS.minBufferScreens) return false;
     if (findFeedContinuation()) return false;
@@ -1322,115 +1333,132 @@
     return true;
   }
 
+  // Finds YouTube's own "Show more" button.
+  //
+  // Scoped to the continuation area on purpose. A loose text match anywhere on
+  // the page would eventually hit an unrelated control labelled "More" and click
+  // something the user never asked to click -- the exact class of bug that makes
+  // an extension feel like it is taking over the browser.
+  function findFeedReloadButton() {
+    const scopes = [
+      "ytd-continuation-item-renderer",
+      "#continuations",
+      "ytd-rich-grid-renderer #continuations",
+      "ytd-rich-grid-renderer"
+    ];
+    const seen = new Set();
+    for (const scope of scopes) {
+      document.querySelectorAll(scope).forEach((root) => {
+        if (seen.has(root)) return;
+        seen.add(root);
+        const buttons = root.querySelectorAll(
+          "button, ytd-button-renderer, [role='button'], a[href='#'], a[role='button']"
+        );
+        buttons.forEach((button) => {
+          if (seen.has(button)) return;
+          seen.add(button);
+          if (button.disabled || button.hasAttribute("disabled") || button.getAttribute("aria-disabled") === "true") return;
+          if (!button.isConnected) return;
+          const raw =
+            button.getAttribute("aria-label") ||
+            button.getAttribute("title") ||
+            button.innerText ||
+            button.textContent ||
+            "";
+          const label = String(raw).replace(/\s+/g, " ").trim().toLowerCase();
+          if (!label || label.length > 40) return;
+          if (ENDLESS_RELOAD_LABELS.some((t) => label === t || label.startsWith(t))) {
+            found.button = button;
+          }
+        });
+      });
+      if (found.button) break;
+    }
+    return found.button;
+  }
+
+  const found = { button: null };
+
   function scheduleEndlessRecovery() {
     if (!endlessFeedEnabled() || endlessRunning) return;
     // Home feed only. A channel or subscriptions page may legitimately end, and
-    // silently reloading one of those would be far more annoying than a short
-    // feed. This also means the extension can never reload itself while the user
-    // is watching something.
+    // pressing a button there would be wrong. This also means the extension can
+    // never act while the user is watching something.
     if (location.pathname !== "/") return;
-    if (endlessRecoveries >= ENDLESS.maxRecoveries) return;
-    if (!recoveryBudgetAvailable()) return;
+    if (endlessPresses >= ENDLESS.maxPresses) return;
+    if (endlessEmptyPresses >= 3) return;
     if (endlessTimer) return;
     const wait = Math.max(ENDLESS.settleQuietMs, ENDLESS.cooldownMs - (Date.now() - endlessLastRun));
     endlessTimer = window.setTimeout(() => {
       endlessTimer = null;
-      recoverFeed();
+      pressFeedReloadButton();
     }, wait);
   }
 
-  // A page-load counter alone is not a budget. Every recovery reloads the page,
-  // which resets that counter, so a feed that never fills would reload forever.
-  // This survives the reload and caps recoveries across page loads.
-  function recoveryBudgetAvailable() {
-    try {
-      const raw = sessionStorage.getItem(FEED_RECOVERY_KEY);
-      if (!raw) return true;
-      const record = JSON.parse(raw);
-      if (!record || typeof record.first !== "number") return true;
-      if (Date.now() - record.first > ENDLESS.budgetWindowMs) return true;
-      return (record.count || 0) < ENDLESS.maxRecoveriesPerWindow;
-    } catch (error) {
-      // Unreadable state must not block recovery forever.
-      return true;
-    }
-  }
-
-  function noteRecovery() {
-    try {
-      const raw = sessionStorage.getItem(FEED_RECOVERY_KEY);
-      let record = { first: Date.now(), count: 0 };
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed.first === "number" && Date.now() - parsed.first <= ENDLESS.budgetWindowMs) {
-          record = parsed;
-        }
-      }
-      record.count = (record.count || 0) + 1;
-      sessionStorage.setItem(FEED_RECOVERY_KEY, JSON.stringify(record));
-    } catch (error) {
-      // Budget tracking is best-effort.
-    }
-  }
-
-  // A fresh batch of recommendations only exists after a fresh request, and the
-  // only request we are allowed to make is YouTube's own. So the recovery is a
-  // reload that restores the scroll position: invisible as a navigation, but
-  // the user never hits a dead end and never has to press F5 themselves.
-  function recoverFeed() {
+  function pressFeedReloadButton() {
     if (!endlessFeedEnabled() || endlessRunning) return;
-    if (endlessRecoveries >= ENDLESS.maxRecoveries) return;
+    if (endlessPresses >= ENDLESS.maxPresses) return;
     if (!feedIsExhausted()) return;
+
+    found.button = null;
+    const button = findFeedReloadButton();
+    if (!button) {
+      // YouTube offered nothing to press. Say so once and stop, rather than
+      // reloading the page or hammering the site.
+      endlessEmptyPresses += 1;
+      if (endlessEmptyPresses >= 2) {
+        showFeedStatus("YouTube не даёт продолжить ленту", true);
+      }
+      return;
+    }
 
     endlessRunning = true;
     endlessLastRun = Date.now();
-    endlessRecoveries += 1;
-    noteRecovery();
-    rememberScrollPosition();
+    endlessPresses += 1;
 
-    showFeedStatus("Лента закончилась — обновляю…");
-    // Let the note paint before the page goes away, otherwise the recovery is
-    // invisible and reads as the extension having frozen.
-    window.setTimeout(() => location.reload(), 900);
-  }
+    const before = countFeedItems();
+    showFeedStatus("Лента обновляется…");
 
-  function rememberScrollPosition() {
+    // YouTube issues the request and renders the result. We only press the button.
     try {
-      const doc = document.scrollingElement || document.documentElement;
-      sessionStorage.setItem(FEED_SCROLL_KEY, String(doc ? doc.scrollTop : 0));
+      button.click();
     } catch (error) {
-      // Blocked storage: recovery still works, just without restoring the
-      // user's offset.
-    }
-  }
-
-  function restoreScrollPosition() {
-    let saved = null;
-    try {
-      saved = sessionStorage.getItem(FEED_SCROLL_KEY);
-      sessionStorage.removeItem(FEED_SCROLL_KEY);
-    } catch (error) {
+      endlessRunning = false;
+      endlessEmptyPresses += 1;
       return;
     }
-    if (saved === null) return;
-    const target = Number(saved);
-    if (!Number.isFinite(target) || target < 1) return;
 
-    // Wait for the grid to actually hold rows before restoring. Restoring into a
-    // still-empty document lets the browser clamp the offset straight back to 0.
-    let attempts = 0;
-    const place = () => {
-      attempts += 1;
-      const doc = document.scrollingElement || document.documentElement;
-      const grid = document.querySelector("ytd-rich-grid-renderer #contents");
-      if (doc && (!grid || grid.children.length === 0) && attempts < 60) {
-        window.requestAnimationFrame(place);
+    const deadline = Date.now() + ENDLESS.settleMs;
+    const poll = () => {
+      const after = countFeedItems();
+      if (after > before) {
+        endlessEmptyPresses = 0;
+        endlessRunning = false;
+        clearFeedStatus();
+        // Top up again if there is still not enough below the fold.
+        if (feedIsExhausted() || feedBufferScreens() < LOOKAHEAD.targetScreens) {
+          scheduleEndlessRecovery();
+        }
         return;
       }
-      if (doc) doc.scrollTop = target;
+      if (Date.now() >= deadline) {
+        // The button produced nothing. Stop after a couple of attempts instead
+        // of pressing forever.
+        endlessEmptyPresses += 1;
+        endlessRunning = false;
+        if (endlessEmptyPresses >= 2) {
+          showFeedStatus("YouTube не даёт продолжить ленту", true);
+        } else {
+          clearFeedStatus();
+          scheduleEndlessRecovery();
+        }
+        return;
+      }
+      window.setTimeout(poll, ENDLESS.settlePollMs);
     };
-    window.requestAnimationFrame(place);
+    window.setTimeout(poll, ENDLESS.settlePollMs);
   }
+
   function connectHome() {
     if (!isFilterSurface() || !state.enabled || isShortsPlayerPage()) {
       disconnectHome();
@@ -1443,9 +1471,6 @@
       homeObserver = new MutationObserver(onHomeMutations);
       homeObserver.observe(document.documentElement, { childList: true, subtree: true });
     }
-    // If the endless feed reloaded the page to escape a dead end, put the user
-    // back at the offset they were reading at before it gave out.
-    restoreScrollPosition();
     scheduleHomeScan();
   }
 
