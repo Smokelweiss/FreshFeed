@@ -87,6 +87,14 @@
     }
     return FILTER_SURFACES.some((surface) => location.pathname.startsWith(surface));
   }
+  // The two surfaces where YouTube itself pages through the full subscription
+  // list. Both are usable for harvesting: the page is real, the session is real,
+  // and YouTube does the requesting. /feed/channels is the legacy grid,
+  // /feed/subscriptions the modern one.
+  function isSubscriptionListPage() {
+    return location.pathname === "/feed/channels" || location.pathname === "/feed/subscriptions";
+  }
+
   const DEFAULT_CHANNELS = { ids: [], handles: [], customUrls: [], names: [], records: [] };
   const DEFAULT_SETTINGS = {
     hideSubscribedChannels: true,
@@ -1481,7 +1489,7 @@
     } else {
       disconnectHome();
     }
-    if (location.pathname === "/feed/channels" && state.syncFallback) {
+    if (isSubscriptionListPage() && state.syncFallback) {
       startFallbackSync();
     }
     // The three-dot "Blacklist" action is useful on every YouTube page that
@@ -1937,11 +1945,6 @@
     return null;
   }
 
-  function htmlValue(html, key) {
-    const match = html.match(new RegExp("\"" + key + "\"\\s*:\\s*\"([^\"]+)\""));
-    return match ? match[1].replace(/\\u0026/g, "&") : "";
-  }
-
   function channelTitle(value) {
     if (!value || typeof value !== "object") {
       return "";
@@ -1993,20 +1996,20 @@
     }
   }
 
-  async function authorizationHeader() {
-    const item = document.cookie.split("; ").find((entry) => entry.startsWith("SAPISID=") || entry.startsWith("__Secure-3PAPISID="));
-    if (!item) {
-      return "";
-    }
-    const separator = item.indexOf("=");
-    const value = decodeURIComponent(item.slice(separator + 1));
-    const timestamp = Math.floor(Date.now() / 1000);
-    const digest = await crypto.subtle.digest(
-      "SHA-1",
-      new TextEncoder().encode(timestamp + " " + value + " https://www.youtube.com")
-    );
-    const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-    return "SAPISIDHASH " + timestamp + "_" + hash;
+  // Union of two channel states. Used when a partial result has to be combined
+  // with what is already stored, so an incomplete fetch can only ever add
+  // coverage and never shrink the list.
+  function unionChannelState(a, b) {
+    const left = a && typeof a === "object" ? a : {};
+    const right = b && typeof b === "object" ? b : {};
+    const pick = (key) => [].concat(left[key] || [], right[key] || []).filter(Boolean);
+    return normalizeChannelState({
+      ids: pick("ids"),
+      handles: pick("handles"),
+      customUrls: pick("customUrls"),
+      names: pick("names"),
+      records: [].concat(left.records || [], right.records || [])
+    });
   }
 
   async function fetchSubscriptions(onProgress) {
@@ -2021,64 +2024,20 @@
     }
     const result = { channels: new Map(), tokens: new Set() };
     collectSubscriptionData(initialData, result, 0);
-    const apiKey = htmlValue(html, "INNERTUBE_API_KEY");
-    const clientVersion = htmlValue(html, "INNERTUBE_CLIENT_VERSION");
-    if (!apiKey || !clientVersion) {
-      throw new Error("YouTube API configuration unavailable");
-    }
-    const authorization = await authorizationHeader();
-    const headers = {
-      "Content-Type": "application/json",
-      "X-Origin": "https://www.youtube.com",
-      "X-Youtube-Client-Name": "1",
-      "X-Youtube-Client-Version": clientVersion
-    };
-    if (authorization) {
-      headers.Authorization = authorization;
-    }
-    let round = 0;
-    let skippedPages = 0;
-    onProgress({ count: result.channels.size, round, skippedPages });
-    while (result.tokens.size && round < 200) {
-      const token = result.tokens.values().next().value;
-      result.tokens.delete(token);
-      const continuationResponse = await fetchWithTimeout(
-        "https://www.youtube.com/youtubei/v1/browse?key=" + encodeURIComponent(apiKey) + "&prettyPrint=false",
-        {
-          method: "POST",
-          credentials: "include",
-          headers,
-          body: JSON.stringify({
-            context: { client: { clientName: "WEB", clientVersion } },
-            continuation: token
-          })
-        },
-        10000
-      );
-      if (!continuationResponse.ok) {
-        skippedPages += 1;
-        onProgress({ count: result.channels.size, round, skippedPages });
-        continue;
-      }
-      let pageData;
-      try {
-        pageData = await continuationResponse.json();
-      } catch (error) {
-        skippedPages += 1;
-        onProgress({ count: result.channels.size, round, skippedPages });
-        continue;
-      }
-      const page = { channels: new Map(), tokens: new Set() };
-      collectSubscriptionData(pageData, page, 0);
-      page.channels.forEach((channel, id) => {
-        if (!result.channels.has(id) || (!result.channels.get(id).handle && channel.handle)) {
-          result.channels.set(id, channel);
-        }
-      });
-      page.tokens.forEach((pageToken) => result.tokens.add(pageToken));
-      round += 1;
-      onProgress({ count: result.channels.size, round, skippedPages });
-    }
+
+    // The old implementation paged through the remaining channels by POSTing to
+    // youtubei/v1/browse with a SAPISIDHASH header. That can never work from a
+    // content script: SAPISID is HttpOnly, so document.cookie never exposes it
+    // and the header could not be built at all. YouTube answers the
+    // unauthenticated call with an empty shell, so every page was a wasted
+    // round-trip that taught us nothing.
+    //
+    // So this no longer forges requests. It reports honestly that the embedded
+    // page holds only the first batch, and the caller completes the list from the
+    // real /feed/channels page where YouTube does the paging itself.
+    const partial = result.tokens.size > 0;
+
+    onProgress({ count: result.channels.size, round: 0, skippedPages: 0 });
     const channels = { ids: [], handles: [], customUrls: [], names: [] };
     result.channels.forEach((channel) => {
       channels.ids.push(channel.id);
@@ -2097,7 +2056,11 @@
     }
     return {
     ...normalizeChannelState(channels),
-    skippedPages
+    // A partial list must never be presented as a complete one. Channels missing
+    // from it are exactly the videos that leak through the filter, and that is
+    // worse than an obviously unfinished sync because it looks like it worked.
+    partial,
+    skippedPages: 0
     };
   }
 
@@ -2118,6 +2081,43 @@
         }
       });
       await report.finish();
+
+      // An incomplete batch must not overwrite a complete list. Merge it into
+      // what is already stored so coverage only ever grows, and arm the
+      // page-based completion so the rest gets picked up from the real
+      // subscriptions page instead of from a forged request.
+      if (channels.partial) {
+        const merged = unionChannelState(state.channels, channels);
+        const mergedTotal = channelCount(merged);
+        const syncedAt = Date.now();
+        state.channels = merged;
+        state.syncedAt = syncedAt;
+        state.syncPending = false;
+        state.syncFallback = true;
+        state.syncProgress = null;
+        updateSets();
+        const note = "Synced " + mergedTotal + " channels so far. YouTube had more pages queued, " +
+          "so open your subscriptions page once to finish the list - channels still missing are " +
+          "videos FreshFeed cannot hide yet.";
+        await browser.storage.local.set({
+          channels: merged,
+          syncedAt,
+          initialSyncDone: true,
+          syncPending: false,
+          syncFallback: true,
+          syncProgress: null,
+          lastSyncResult: note
+        });
+        showOverlay("FreshFeed: " + mergedTotal + " channels - list still incomplete", false);
+        removeOverlayLater();
+        // If the user happens to already be on the subscriptions page, complete
+        // it right now instead of waiting for a future visit.
+        if (isSubscriptionListPage()) {
+          startFallbackSync();
+        }
+        return;
+      }
+
       const total = channelCount(channels);
       const syncedAt = Date.now();
       state.channels = channels;
@@ -2264,7 +2264,7 @@
   }
 
   async function startFallbackSync() {
-    if (fallbackRunning || location.pathname !== "/feed/channels" || !state.syncFallback) {
+    if (fallbackRunning || !isSubscriptionListPage() || !state.syncFallback) {
       return;
     }
     fallbackRunning = true;
@@ -2292,8 +2292,12 @@
     }
     const channels = collectVisibleSubscriptions();
     await report.finish();
-    const total = channelCount(channels);
-    const values = total > 0 ? channels : state.channels;
+    // Union with what is already stored: this pass may legitimately see fewer
+    // channels than a previous one (a lazy page, a changed layout), and the
+    // stored list must never shrink because of it.
+    const merged = unionChannelState(state.channels, channels);
+    const total = channelCount(merged);
+    const values = total > 0 ? merged : state.channels;
     state.channels = values;
     state.syncedAt = total > 0 ? Date.now() : state.syncedAt;
     state.syncPending = false;
@@ -2515,7 +2519,7 @@
     }
     if (changes.syncFallback) {
       state.syncFallback = Boolean(changes.syncFallback.newValue);
-      if (state.syncFallback && location.pathname === "/feed/channels") {
+      if (state.syncFallback && isSubscriptionListPage()) {
         startFallbackSync();
       }
     }
@@ -2591,7 +2595,7 @@
     }, true);
     document.addEventListener("click", observeNotInterestedAction, true);
     updatePageMode();
-    if (state.syncFallback && location.pathname === "/feed/channels") {
+    if (state.syncFallback && isSubscriptionListPage()) {
       startFallbackSync();
     } else if (state.syncPending) {
       maybeStartSync();
