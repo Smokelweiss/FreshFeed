@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="icons/icon.svg" width="420" alt="FreshFeed">
+</p>
+
 # FreshFeed
 
 ## Слои синхронизации
