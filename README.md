@@ -28,27 +28,48 @@ servers.
 
 ### How feed loading works
 
-Both feed features drive **YouTube's own continuation mechanism** — the same
-element and the same internal API YouTube's own scroll handler uses. FreshFeed
-never fabricates feed content and never calls YouTube's private InnerTube API.
+Smooth scroll drives **YouTube's own continuation mechanism** — the same
+element and the same internal handlers YouTube's own scroll handler uses. It
+asks for more rows when the buffer below the fold is thin rather than when the
+user happens to be scrolling, waits long enough that a slow response is not
+mistaken for a dead end, and re-arms itself so it works with the tab idle.
 
-That is a deliberate constraint, not a stylistic one. The earlier
-implementation posted to `youtubei/v1/browse` and pasted hand-built cards into
-the grid. It could not work from a content script, and the attempts were
-verified dead against the live site:
+The feed is finite, so "endless" means "never dead-ends while you scroll": when
+YouTube genuinely runs out, FreshFeed refills the feed and restores your scroll
+position. It acts only on the home feed, never while you are watching something,
+and a budget in `sessionStorage` caps it so it cannot reload forever.
 
-- the request needs a `SAPISIDHASH` header, but `SAPISID` is `HttpOnly`, so
-  `document.cookie` never contains it and no `Authorization` header can be built;
-- YouTube answers an unfingerprinted InnerTube call with a ~112 KB shell of
-  ~440 nodes containing **zero** video renderers and **zero** continuation
-  tokens, so there is no content to extract;
-- a hand-built `<ytd-rich-item-renderer>` is re-rendered by Polymer's own
-  template, so appended cards appeared blank even when data did arrive.
+### How subscription sync works
 
-The feed is finite, so "endless" means "never dead-ends while you scroll": the
-recovery refills the feed and puts you back where you were. It acts only on the
-home feed, never while you are watching something, and a budget in
-`sessionStorage` caps it so it cannot reload forever.
+Sync runs **entirely in the background**. FreshFeed fetches
+`/feed/channels` with `credentials: "include"`, so the browser attaches the
+session cookies itself, then pages through any remaining continuation tokens via
+InnerTube using a `SAPISIDHASH` header. It never navigates the tab, and it never
+asks the user to go visit a page.
+
+That header is worth a note, because getting it wrong cost this extension a
+whole feature. An earlier version asserted that `SAPISID` was `HttpOnly` and
+therefore unobtainable from a content script, and the endless feed was
+rewritten on the strength of that claim. **The claim was false.** It came from
+a probe run in a signed-out session, where `SAPISID` was simply missing from the
+cookie jar, and "missing" was read as "HttpOnly". Measured while signed in:
+
+```
+PREF, APISID, SAPISID, __Secure-1PAPISID, __Secure-3PAPISID, SID, SIDCC
+```
+
+The scheme is *designed* to work from page script — authenticating web-originated
+InnerTube calls is its entire purpose. With the header, a `FEwhat_to_watch`
+browse returns 25 videos plus a continuation token; without it, an empty shell
+with no videos and no token.
+
+Why the endless feed does not append cards even so: the data is obtainable, but
+rendering is not. Hand-built `<ytd-rich-item-renderer>` elements are re-rendered
+by Polymer's own template and come out blank, and the grid's own append handler
+is minified and routes through a command-keyed action map that silently ignores a
+raw parsed response. Depending on minified internals would break without warning,
+so the feed recovers by refilling instead.
+
 
 ## Quick start
 

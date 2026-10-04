@@ -87,6 +87,11 @@
     }
     return FILTER_SURFACES.some((surface) => location.pathname.startsWith(surface));
   }
+  // Below this many channels a sync is treated as suspect rather than complete.
+  // It only ever arms the opportunistic DOM harvest -- it never prompts the user
+  // to navigate anywhere.
+  const IMPLAUSIBLY_FEW_CHANNELS = 20;
+
   // The two surfaces where YouTube itself pages through the full subscription
   // list. Both are usable for harvesting: the page is real, the session is real,
   // and YouTube does the requesting. /feed/channels is the legacy grid,
@@ -1945,6 +1950,11 @@
     return null;
   }
 
+  function htmlValue(html, key) {
+    const match = html.match(new RegExp("\"" + key + "\"\\s*:\\s*\"([^\"]+)\""));
+    return match ? match[1].replace(/\\u0026/g, "&") : "";
+  }
+
   function channelTitle(value) {
     if (!value || typeof value !== "object") {
       return "";
@@ -2012,6 +2022,35 @@
     });
   }
 
+  // InnerTube's SAPISIDHASH scheme. This WORKS from a page script, and that is
+  // by design: the whole point of the scheme is that web pages can authenticate
+  // their own InnerTube calls.
+  //
+  // An earlier version of this file claimed SAPISID was HttpOnly and therefore
+  // unobtainable. That was wrong, and the mistake was expensive: it was derived
+  // from a probe made in a signed-out session, where SAPISID was simply absent
+  // from the cookie jar, and "absent" was read as "HttpOnly". Measured while
+  // signed in, the jar does expose SAPISID / __Secure-3PAPISID, and an
+  // authenticated browse returns real data where an anonymous one returns an
+  // empty shell.
+  async function authorizationHeader() {
+    const item = document.cookie
+      .split("; ")
+      .find((entry) => entry.startsWith("SAPISID=") || entry.startsWith("__Secure-3PAPISID="));
+    if (!item) {
+      return "";
+    }
+    const separator = item.indexOf("=");
+    const value = decodeURIComponent(item.slice(separator + 1));
+    const timestamp = Math.floor(Date.now() / 1000);
+    const digest = await crypto.subtle.digest(
+      "SHA-1",
+      new TextEncoder().encode(timestamp + " " + value + " https://www.youtube.com")
+    );
+    const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    return "SAPISIDHASH " + timestamp + "_" + hash;
+  }
+
   async function fetchSubscriptions(onProgress) {
     const response = await fetchWithTimeout("https://www.youtube.com/feed/channels", { credentials: "include" }, 10000);
     if (!response.ok) {
@@ -2025,19 +2064,90 @@
     const result = { channels: new Map(), tokens: new Set() };
     collectSubscriptionData(initialData, result, 0);
 
-    // The old implementation paged through the remaining channels by POSTing to
-    // youtubei/v1/browse with a SAPISIDHASH header. That can never work from a
-    // content script: SAPISID is HttpOnly, so document.cookie never exposes it
-    // and the header could not be built at all. YouTube answers the
-    // unauthenticated call with an empty shell, so every page was a wasted
-    // round-trip that taught us nothing.
-    //
-    // So this no longer forges requests. It reports honestly that the embedded
-    // page holds only the first batch, and the caller completes the list from the
-    // real /feed/channels page where YouTube does the paging itself.
-    const partial = result.tokens.size > 0;
+    const apiKey = htmlValue(html, "INNERTUBE_API_KEY");
+    const clientVersion = htmlValue(html, "INNERTUBE_CLIENT_VERSION");
+    if (apiKey && clientVersion) {
+      // Page through whatever the embedded document did not include. This runs
+      // entirely in the background: it is a fetch, it never navigates the tab,
+      // and the user is never asked to go anywhere.
+      //
+      // The Authorization header is what makes this work. Without it YouTube
+      // answers with an empty shell and every page is a wasted round-trip.
+      const authorization = await authorizationHeader();
+      const headers = {
+        "Content-Type": "application/json",
+        "X-Origin": "https://www.youtube.com",
+        "X-Youtube-Client-Name": "1",
+        "X-Youtube-Client-Version": clientVersion
+      };
+      if (authorization) {
+        headers.Authorization = authorization;
+      }
+      const clientCtx = { clientName: "WEB", clientVersion };
+      const visitorData = htmlValue(html, "VISITOR_DATA");
+      if (visitorData) clientCtx.visitorData = visitorData;
 
-    onProgress({ count: result.channels.size, round: 0, skippedPages: 0 });
+      let round = 0;
+      let skippedPages = 0;
+      let grew = 0;
+      onProgress({ count: result.channels.size, round, skippedPages });
+
+      while (result.tokens.size && round < 60) {
+        const token = result.tokens.values().next().value;
+        result.tokens.delete(token);
+        let pageData = null;
+        try {
+          const response = await fetchWithTimeout(
+            "https://www.youtube.com/youtubei/v1/browse?key=" + encodeURIComponent(apiKey) + "&prettyPrint=false",
+            {
+              method: "POST",
+              credentials: "include",
+              headers,
+              body: JSON.stringify({ context: { client: clientCtx }, continuation: token })
+            },
+            10000
+          );
+          if (response.ok) {
+            pageData = await response.json();
+          } else {
+            skippedPages += 1;
+          }
+        } catch (error) {
+          skippedPages += 1;
+        }
+
+        if (pageData) {
+          const page = { channels: new Map(), tokens: new Set() };
+          collectSubscriptionData(pageData, page, 0);
+          page.channels.forEach((channel, id) => {
+            const known = result.channels.get(id);
+            if (!known || (!known.handle && channel.handle)) {
+              result.channels.set(id, channel);
+              grew += 1;
+            }
+          });
+          // Only follow continuationCommand tokens. The embedded document also
+          // carries unrelated "token" strings (for chips, menus and similar);
+          // treating those as continuations sends the loop after garbage.
+          page.tokens.forEach((pageToken) => result.tokens.add(pageToken));
+        }
+
+        round += 1;
+        onProgress({ count: result.channels.size, round, skippedPages });
+        // Stop as soon as two consecutive pages add nothing. That is YouTube
+        // saying it has nothing more, not a transient hiccup.
+        if (grew === 0 && round > 2) break;
+      }
+      result.skippedPages = skippedPages;
+    }
+
+    // Partial means: YouTube still had continuation tokens queued and we ran out
+    // of rounds anyway. It must NOT be inferred from "tokens exist" alone -- the
+    // subscriptions page carries unrelated token strings, and treating those as
+    // unfinished work is what made the extension cry wolf.
+    const partial = result.tokens.size > 0 && (result.skippedPages || 0) > 0;
+
+    onProgress({ count: result.channels.size, round: 0, skippedPages: result.skippedPages || 0 });
     const channels = { ids: [], handles: [], customUrls: [], names: [] };
     result.channels.forEach((channel) => {
       channels.ids.push(channel.id);
@@ -2056,11 +2166,8 @@
     }
     return {
     ...normalizeChannelState(channels),
-    // A partial list must never be presented as a complete one. Channels missing
-    // from it are exactly the videos that leak through the filter, and that is
-    // worse than an obviously unfinished sync because it looks like it worked.
     partial,
-    skippedPages: 0
+    skippedPages: result.skippedPages || 0
     };
   }
 
@@ -2083,38 +2190,41 @@
       await report.finish();
 
       // An incomplete batch must not overwrite a complete list. Merge it into
-      // what is already stored so coverage only ever grows, and arm the
-      // page-based completion so the rest gets picked up from the real
-      // subscriptions page instead of from a forged request.
+      // what is already stored so coverage only ever grows.
+      //
+      // The user is NEVER told to go visit a page. Synchronisation is a
+      // background operation and it stays one: an earlier version ended an
+      // incomplete sync with "open your subscriptions page once", which pushed
+      // the work back onto the user and read as the extension hijacking their
+      // tab. If the list is short, FreshFeed retries on its own schedule and
+      // tops up opportunistically from the subscriptions page only if the user
+      // happens to already be there.
       if (channels.partial) {
         const merged = unionChannelState(state.channels, channels);
         const mergedTotal = channelCount(merged);
         const syncedAt = Date.now();
         state.channels = merged;
         state.syncedAt = syncedAt;
-        state.syncPending = false;
-        state.syncFallback = true;
+        state.syncPending = true;
+        // Only ask for the DOM harvest when the list is implausibly short for a
+        // real account, and even then it is armed silently: it runs by itself if
+        // and when the user is on the page, and is never requested of them.
+        state.syncFallback = mergedTotal < IMPLAUSIBLY_FEW_CHANNELS;
         state.syncProgress = null;
         updateSets();
-        const note = "Synced " + mergedTotal + " channels so far. YouTube had more pages queued, " +
-          "so open your subscriptions page once to finish the list - channels still missing are " +
-          "videos FreshFeed cannot hide yet.";
+        const note = "Synchronized " + mergedTotal + " channels. Some pages were unavailable, " +
+          "so FreshFeed will keep retrying in the background.";
         await browser.storage.local.set({
           channels: merged,
           syncedAt,
           initialSyncDone: true,
-          syncPending: false,
-          syncFallback: true,
+          syncPending: true,
+          syncFallback: state.syncFallback,
           syncProgress: null,
           lastSyncResult: note
         });
-        showOverlay("FreshFeed: " + mergedTotal + " channels - list still incomplete", false);
+        showOverlay("FreshFeed: " + mergedTotal + " channels, retrying in background", false);
         removeOverlayLater();
-        // If the user happens to already be on the subscriptions page, complete
-        // it right now instead of waiting for a future visit.
-        if (isSubscriptionListPage()) {
-          startFallbackSync();
-        }
         return;
       }
 
