@@ -110,7 +110,8 @@ globalThis.document = {
     }
     // Exact scope strings used by findFeedReloadButton.
     const SCOPES = ['ytd-continuation-item-renderer', '#continuations',
-      'ytd-rich-grid-renderer #continuations', 'ytd-rich-grid-renderer']
+      'ytd-rich-grid-renderer #continuations', 'ytd-rich-grid-renderer #contents',
+      'ytd-rich-grid-renderer']
     if (SCOPES.includes(sel)) return scopeRoots
     const isCardSel = /ytd-(rich-item|video|grid-video|compact-video|rich-shelf|reel-item|reel-video)-renderer|lockup-view-model|shorts-lockup/.test(sel)
     if (isCardSel) return world.cards
@@ -390,6 +391,21 @@ for (let i = 0; i < 6; i++) {
 // The module gives up after 3 consecutive presses that deliver nothing, so the
 // cap is exactly that: 6 opportunities must not become 6 presses.
 check('unproductive presses stop at the cap of 3', world.clicks === 3, 'clicks=' + world.clicks + ' from 6 opportunities')
+
+// The reload UI is sometimes rendered inside the continuation wrapper and
+// sometimes directly in the grid contents. Both must be searched, and the search
+// must still stay inside the grid.
+resetWorld({ scrollHeight: 1000, scrollTop: 0, sentinel: null })
+const inContents = makeButton('Ещё')
+world.buttons = [inContents]
+scopeRoots = [makeScope('ytd-rich-grid-renderer #contents')]
+check('finds the button inside grid contents too', M.findFeedReloadButton() === inContents)
+
+resetWorld({ scrollHeight: 1000, scrollTop: 0, sentinel: null })
+const inGrid = makeButton('Show more')
+world.buttons = [inGrid]
+scopeRoots = [makeScope('ytd-rich-grid-renderer')]
+check('finds the button directly in the grid', M.findFeedReloadButton() === inGrid)
 
 // The old fallback used scrollIntoView on the sentinel, which moved the user's
 // viewport. That must never happen: the user did not ask to be moved.

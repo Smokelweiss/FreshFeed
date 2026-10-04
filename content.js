@@ -1350,10 +1350,16 @@
   // something the user never asked to click -- the exact class of bug that makes
   // an extension feel like it is taking over the browser.
   function findFeedReloadButton() {
+    // Every scope here is inside the home feed grid on purpose. The reload UI is
+    // sometimes rendered inside ytd-continuation-item-renderer and sometimes
+    // directly in the grid contents, so both are scanned; nothing outside the
+    // grid is, because a page-wide "More" match would click something the user
+    // never asked to click.
     const scopes = [
       "ytd-continuation-item-renderer",
       "#continuations",
       "ytd-rich-grid-renderer #continuations",
+      "ytd-rich-grid-renderer #contents",
       "ytd-rich-grid-renderer"
     ];
     const seen = new Set();
