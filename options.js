@@ -339,7 +339,12 @@
     cands.forEach((c) => lines.push("      " + c));
     lines.push("  presses            : " + d.presses);
     lines.push("  presses that grew  : " + d.pressesThatGrew);
-    lines.push("  gave up            : " + yes(d.gaveUp));
+    lines.push("");
+    lines.push("Feed refill (clones a real card, uses InnerTube)");
+    lines.push("  running now        : " + yes(d.refillRunning));
+    lines.push("  cards added        : " + (d.refillAdded || 0));
+    lines.push("  batches requested  : " + (d.refillBatches || 0));
+    lines.push("  last error         : " + (d.refillError || "none"));
     lines.push("");
     lines.push("Subscription sync");
     lines.push("  channels           : " + d.syncChannels);

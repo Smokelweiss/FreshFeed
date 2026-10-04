@@ -1143,6 +1143,10 @@
     presses: 0,
     pressesThatGrew: 0,
     gaveUp: false,
+    refillAdded: 0,
+    refillBatches: 0,
+    refillRunning: false,
+    refillError: "",
     syncChannels: 0,
     syncPartial: false,
     syncSkippedPages: 0
@@ -1487,28 +1491,353 @@
     lookaheadTimer = window.setTimeout(poll, LOOKAHEAD.settlePollMs);
   }
 
-  // --- Endless feed ---------------------------------------------------------
-  // When YouTube runs out of continuation tokens on the home feed it does not
-  // just stop: it renders a "Show more" button at the bottom of the grid.
-  // Pressing that button makes YouTube fetch a fresh batch and render it with
-  // its own renderers, which is exactly what an endless feed needs to be.
+  // --- Feed refill -----------------------------------------------------------
+  // Why this exists, and why it looks the way it does.
   //
-  // So this presses the button YouTube already offers. That is deliberately the
-  // whole implementation. The two previous attempts were worse:
+  // Measured on the user's real Firefox: the home feed loads 679 cards, then
+  // YouTube consumes every continuation token and removes the sentinel. Nothing
+  // is rendered at the end of the feed -- the report shows
+  // "continuation-ish: none" and four plain ytd-rich-item-renderer as the last
+  // children. grid.data does not exist and the grid exposes no continuation
+  // methods, so there is no model to push items into.
   //
-  //   * Reloading the page. It works, and the user hates it: a full reload to
-  //     extend a list is a visible, jarring interruption that throws away
-  //     everything the page was doing. Removed outright.
-  //   * Appending cards built from InnerTube data. The data is obtainable --
-  //     an authenticated browse returns real videos -- but the rendering is not.
-  //     A hand-built <ytd-rich-item-renderer> is re-rendered by Polymer's own
-  //     template and comes out blank, and the grid's own append handler is
-  //     minified and routes through a command-keyed action map that silently
-  //     ignores a raw parsed response. Depending on minified internals would
-  //     break without warning.
+  // Two earlier conclusions were wrong and are retracted here:
   //
-  // Pressing a button the user could have pressed themselves is stable, needs no
-  // internal API, and cannot fabricate anything.
+  //   * "YouTube renders a Show more button at the end of the feed." It does
+  //     not, on this build. Every "more" button on the page belongs to a shelf
+  //     or a chip row, which is why pressing one did nothing.
+  //   * "Hand-built cards are re-rendered by Polymer's own template and come out
+  //     blank." That was measured in a browser where Polymer never hydrated, so
+  //     the conclusion was drawn from a page that was not rendering anything.
+  //     The same report that disproved it also shows grid.data missing and no
+  //     grid methods: the feed is server-rendered HTML, Polymer is not
+  //     hydrating it, and therefore it cannot re-render anything we insert.
+  //
+  // So cards are built by CLONING a real card that is already on the page and
+  // rewriting its link and thumbnail. That guarantees identical structure, class
+  // names and styling to the surrounding feed, without guessing at markup and
+  // without depending on a data model that is not there.
+  const REFILL = {
+    // How many fresh batches to request per refill.
+    maxBatches: 3,
+    // Stop a batch chain after this many continuation hops.
+    maxHops: 8,
+    requestTimeoutMs: 12000,
+    settleQuietMs: 3000
+  };
+
+  // The InnerTube credentials live on the page's own ytcfg. Reading them from
+  // the DOM source is the fallback for the rare case where ytcfg is not
+  // reachable from the content script.
+  let innertubeConfig = null;
+
+  async function innertubeConfigFor() {
+    if (innertubeConfig) return innertubeConfig;
+    let apiKey = "";
+    let clientVersion = "";
+    let visitorData = "";
+    try {
+      if (window.ytcfg && typeof window.ytcfg.get === "function") {
+        apiKey = window.ytcfg.get("INNERTUBE_API_KEY") || "";
+        clientVersion = window.ytcfg.get("INNERTUBE_CLIENT_VERSION") || "";
+        visitorData = window.ytcfg.get("VISITOR_DATA") || "";
+      }
+    } catch (error) {
+      // ytcfg belongs to the page; fall through to the DOM source below.
+    }
+    if ((!apiKey || !clientVersion) && document.documentElement) {
+      const source = document.documentElement.outerHTML || "";
+      const keyMatch = source.match(/"INNERTUBE_API_KEY":\s*"([^"]+)"/);
+      const versionMatch = source.match(/"INNERTUBE_CLIENT_VERSION":\s*"([^"]+)"/);
+      const visitorMatch = source.match(/"VISITOR_DATA":\s*"([^"]+)"/);
+      if (keyMatch) apiKey = keyMatch[1];
+      if (versionMatch) clientVersion = versionMatch[1];
+      if (!visitorData && visitorMatch) visitorData = visitorMatch[1];
+    }
+    if (!apiKey || !clientVersion) return null;
+    innertubeConfig = { apiKey, clientVersion, visitorData };
+    return innertubeConfig;
+  }
+
+  const refillState = {
+    videoIds: new Set(),
+    templateCard: null,
+    running: false,
+    added: 0,
+    batches: 0,
+    error: ""
+  };
+
+  // Video ids already in the grid, so a refill never repeats what the user has
+  // already scrolled past.
+  function seedRefillVideoIds() {
+    refillState.videoIds = new Set();
+    document.querySelectorAll(CARD_SELECTOR).forEach((card) => {
+      const href = firstVideoHref(card);
+      if (!href) return;
+      const match = href.match(/[?&]v=([\w-]{6,})/);
+      if (match) refillState.videoIds.add(match[1]);
+    });
+    return refillState.videoIds.size;
+  }
+
+  // A real card to copy the shape of. Prefer a plain video card over a shelf or
+  // a Shorts lockup, since those have very different internal structure.
+  function findRefillTemplate() {
+    if (refillState.templateCard && refillState.templateCard.isConnected) {
+      return refillState.templateCard;
+    }
+    const grid = document.querySelector("ytd-rich-grid-renderer #contents, #contents");
+    if (!grid) return null;
+    const candidates = Array.from(grid.querySelectorAll("ytd-rich-item-renderer"))
+      .filter((card) => {
+        const href = firstVideoHref(card);
+        return Boolean(href) && href.includes("/watch?v=");
+      });
+    refillState.templateCard = candidates[0] || null;
+    return refillState.templateCard;
+  }
+
+  // Pulls every video out of one browse/continuation response.
+  function extractVideos(data) {
+    const out = [];
+    const seen = new Set();
+    const queue = [data];
+    let guard = 0;
+    while (queue.length && guard < 200000) {
+      guard += 1;
+      const node = queue.shift();
+      if (!node || typeof node !== "object") continue;
+      const id = typeof node.videoId === "string" ? node.videoId : "";
+      if (id && /^[A-Za-z0-9_-]{11}$/.test(id) && !seen.has(id)) {
+        seen.add(id);
+        out.push({
+          id,
+          title: runsText(node.title) || runsText(node.headline),
+          byline: runsText(node.ownerText) ||
+            runsText(node.shortBylineText) ||
+            runsText(node.longBylineText) ||
+            runsText(node.videoOwnerRenderer && node.videoOwnerRenderer.title),
+          channelId: (node.ownerText && node.ownerText.navigationEndpoint &&
+            node.ownerText.navigationEndpoint.browseEndpoint &&
+            node.ownerText.navigationEndpoint.browseEndpoint.browseId) || "",
+          thumbnail: pickThumbnail(node)
+        });
+      }
+      for (const value of Object.values(node)) {
+        if (value && typeof value === "object") queue.push(value);
+      }
+    }
+    return out;
+  }
+
+  function runsText(value) {
+    if (!value) return "";
+    if (typeof value === "string") return value;
+    if (typeof value.simpleText === "string") return value.simpleText;
+    if (Array.isArray(value.runs)) return value.runs.map((r) => r.text || "").join("");
+    return "";
+  }
+
+  function pickThumbnail(node) {
+    const thumbs = node.thumbnail && node.thumbnail.thumbnails;
+    if (!Array.isArray(thumbs)) return "";
+    const sizes = ["maxresdefault", "sddefault", "hqdefault", "mqdefault", "default"];
+    for (const size of sizes) {
+      const hit = thumbs.find((t) => t.url && t.url.includes("/" + size));
+      if (hit) return hit.url;
+    }
+    return (thumbs.find((t) => t.url) || {}).url || "";
+  }
+
+  function firstContinuationToken(value) {
+    const queue = [value];
+    const seen = new Set();
+    let guard = 0;
+    while (queue.length && guard < 200000) {
+      guard += 1;
+      const node = queue.shift();
+      if (!node || typeof node !== "object" || seen.has(node)) continue;
+      seen.add(node);
+      if (node.continuationCommand && typeof node.continuationCommand.token === "string") {
+        return node.continuationCommand.token;
+      }
+      for (const child of Object.values(node)) {
+        if (child && typeof child === "object") queue.push(child);
+      }
+    }
+    return "";
+  }
+
+  // Builds a card by cloning a real one, so it matches the feed exactly.
+  function buildCardFromTemplate(template, video) {
+    const card = template.cloneNode(true);
+    card.removeAttribute("data-ff-checked");
+    card.removeAttribute("data-ff-pending");
+    card.removeAttribute("data-ff-pending-attempts");
+    card.removeAttribute("data-ff-href");
+    card.removeAttribute("style");
+    card.setAttribute("data-ff-refilled", "1");
+
+    const href = "/watch?v=" + video.id;
+
+    // Every link on the card points at the video. Shorts links are removed so a
+    // refilled Shorts lockup cannot masquerade as a video.
+    card.querySelectorAll("a[href]").forEach((link) => {
+      const current = link.getAttribute("href") || "";
+      if (current.includes("/shorts/")) {
+        link.removeAttribute("href");
+        link.removeAttribute("title");
+        return;
+      }
+      link.setAttribute("href", href);
+    });
+
+    const titleLink = card.querySelector("a#video-title, a#video-title-link, #video-title");
+    if (titleLink) {
+      titleLink.setAttribute("href", href);
+      titleLink.setAttribute("title", video.title || video.id);
+      titleLink.textContent = video.title || video.id;
+    }
+
+    const thumbLink = card.querySelector("a#thumbnail, #thumbnail a, a.yt-lockup-view-model__content-image");
+    if (thumbLink) {
+      thumbLink.setAttribute("href", href);
+      thumbLink.setAttribute("aria-label", video.title || video.id);
+    }
+
+    // Swap the thumbnail image. The card may have several sizes; the last one is
+    // normally the largest actually rendered.
+    const images = card.querySelectorAll("img");
+    if (images.length && video.thumbnail) {
+      images.forEach((img) => img.setAttribute("src", video.thumbnail));
+    }
+
+    const byline = card.querySelector("#byline, .yt-content-metadata-view-model__metadata-text");
+    if (byline && video.byline) {
+      byline.textContent = video.byline;
+    }
+
+    return card;
+  }
+
+  function appendRefilledVideos(videos) {
+    const grid = document.querySelector("ytd-rich-grid-renderer #contents, #contents");
+    const template = findRefillTemplate();
+    if (!grid || !template) return 0;
+    let added = 0;
+    for (const video of videos) {
+      if (!video.id || refillState.videoIds.has(video.id)) continue;
+      const card = buildCardFromTemplate(template, video);
+      if (!card) continue;
+      // Insert before the trailing sentinel when there still is one, so
+      // YouTube's own pagination keeps seeing its node last.
+      const tail = grid.querySelector(":scope > ytd-continuation-item-renderer");
+      if (tail) grid.insertBefore(card, tail);
+      else grid.appendChild(card);
+      refillState.videoIds.add(video.id);
+      added += 1;
+    }
+    return added;
+  }
+
+  async function innertubeRequest(config, body) {
+    const authorization = await authorizationHeader();
+    const headers = {
+      "Content-Type": "application/json",
+      "X-Origin": "https://www.youtube.com",
+      "X-Youtube-Client-Name": "1",
+      "X-Youtube-Client-Version": config.clientVersion
+    };
+    if (authorization) headers.Authorization = authorization;
+    const response = await fetchWithTimeout(
+      "https://www.youtube.com/youtubei/v1/browse?key=" + encodeURIComponent(config.apiKey) + "&prettyPrint=false",
+      { method: "POST", credentials: "include", headers, body: JSON.stringify(body) },
+      REFILL.requestTimeoutMs
+    );
+    if (!response.ok) throw new Error("feed request failed with " + response.status);
+    return response.json();
+  }
+
+  // Requests one fresh home batch and follows its continuation chain a few times.
+  async function requestFreshFeedVideos(config) {
+    const client = { clientName: "WEB", clientVersion: config.clientVersion };
+    if (config.visitorData) client.visitorData = config.visitorData;
+    let data = await innertubeRequest(config, {
+      context: { client },
+      browseId: "FEwhat_to_watch"
+    });
+    const videos = extractVideos(data);
+    let token = firstContinuationToken(data);
+    let hops = 0;
+    while (token && hops < REFILL.maxHops) {
+      const next = await innertubeRequest(config, { context: { client }, continuation: token });
+      const more = extractVideos(next);
+      for (const video of more) {
+        if (!videos.some((v) => v.id === video.id)) videos.push(video);
+      }
+      const nextToken = firstContinuationToken(next);
+      if (!nextToken || nextToken === token) break;
+      token = nextToken;
+      hops += 1;
+    }
+    return videos;
+  }
+
+  async function refillHomeFeed() {
+    if (refillState.running) return;
+    if (!endlessFeedEnabled()) return;
+    if (location.pathname !== "/") return;
+    if (!feedIsExhausted()) return;
+
+    const config = await innertubeConfigFor();
+    if (!config) {
+      diag.refillError = "no YouTube API configuration";
+      return;
+    }
+
+    refillState.running = true;
+    diag.refillRunning = true;
+    seedRefillVideoIds();
+    const known = refillState.videoIds.size;
+
+    try {
+      let added = 0;
+      refillState.batches = 0;
+      for (let batch = 0; batch < REFILL.maxBatches; batch += 1) {
+        const videos = await requestFreshFeedVideos(config);
+        refillState.batches += 1;
+        const fresh = videos.filter((video) => !refillState.videoIds.has(video.id));
+        if (!fresh.length) break;
+        added += appendRefilledVideos(fresh);
+        if (added === 0) break;
+      }
+      refillState.added += added;
+      diag.refillAdded = (diag.refillAdded || 0) + added;
+      diag.refillBatches = (diag.refillBatches || 0) + refillState.batches;
+      diag.refillError = "";
+      if (added > 0) {
+        // Let the filter process the new cards, then report.
+        if (homeActive) scheduleHomeScan();
+        showFeedStatus("Лента продолжена: +" + added);
+      }
+    } catch (error) {
+      refillState.error = (error && error.message) || String(error);
+      diag.refillError = refillState.error;
+    } finally {
+      refillState.running = false;
+      diag.refillRunning = false;
+      flushDiag(true);
+    }
+
+    if (refillState.error) {
+      showFeedStatus("Не удалось продолжить ленту", true);
+    } else {
+      clearFeedStatus();
+    }
+    void known;
+  }
+
   const ENDLESS = {
     // Consider the feed finished once the buffer is this thin ...
     minBufferScreens: 1.5,
@@ -1516,9 +1845,8 @@
     settleQuietMs: 2500,
     // Never press more often than this.
     cooldownMs: 12000,
-    // Give up on this page load after this many presses. YouTube only offers the
-    // button when it genuinely has another batch; if pressing it stops producing
-    // items, something is wrong and retrying forever would hammer the site.
+    // Never present, so only the cap on presses can end it, plus the refill's
+    // own guards. maxPresses stays as a runaway brake.
     maxPresses: 30,
     // A candidate button is only accepted within this many screens of the bottom
     // of the grid. Measured on a real 679-card page: the only "more" buttons
@@ -1734,7 +2062,7 @@
     // never act while the user is watching something.
     if (location.pathname !== "/") return;
     if (endlessPresses >= ENDLESS.maxPresses) return;
-    if (endlessEmptyPresses >= 3) return;
+    if (endlessEmptyPresses >= 8) return;
     if (endlessTimer) return;
     const wait = Math.max(ENDLESS.settleQuietMs, ENDLESS.cooldownMs - (Date.now() - endlessLastRun));
     endlessTimer = window.setTimeout(() => {
@@ -1744,7 +2072,7 @@
   }
 
   function pressFeedReloadButton() {
-    if (!endlessFeedEnabled() || endlessRunning) return;
+    if (!endlessFeedEnabled() || refillState.running) return;
     if (endlessPresses >= ENDLESS.maxPresses) return;
 
     diag.endlessOn = true;
@@ -1752,76 +2080,60 @@
     if (!diag.exhausted) return;
     snapshotPage();
 
+    // YouTube renders no control at the end of the home feed on this build, and
+    // the only "more" buttons on the page belong to shelves. So the feed is
+    // refilled from YouTube's own browse endpoint instead, and the cards are
+    // cloned from a card already on the page.
+    //
+    // The button press stays as a first attempt: if a future YouTube build does
+    // render a real reload control at the end of the feed, that is the better
+    // path and it costs nothing to try.
     found.button = null;
     const button = findFeedReloadButton();
-    if (!button) {
-      // YouTube offered nothing to press. Say so once and stop, rather than
-      // reloading the page or hammering the site.
-      endlessEmptyPresses += 1;
-      diag.gaveUp = true;
-      note("endless:no-button");
-      if (endlessEmptyPresses >= 2) {
-        showFeedStatus("YouTube не даёт продолжить ленту", true);
-      }
-      flushDiag(true);
-      return;
-    }
-
-    endlessRunning = true;
-    endlessLastRun = Date.now();
-    endlessPresses += 1;
-    diag.presses = endlessPresses;
-    note("endless:press", diag.reloadButton);
-    flushDiag();
-
-    const before = countFeedItems();
-    showFeedStatus("Лента обновляется…");
-
-    // YouTube issues the request and renders the result. We only press the button.
-    try {
-      button.click();
-    } catch (error) {
-      endlessRunning = false;
-      endlessEmptyPresses += 1;
-      return;
-    }
-
-    const deadline = Date.now() + ENDLESS.settleMs;
-    const poll = () => {
-      const after = countFeedItems();
-      if (after > before) {
-        endlessEmptyPresses = 0;
+    if (button) {
+      endlessRunning = true;
+      endlessLastRun = Date.now();
+      endlessPresses += 1;
+      diag.presses = endlessPresses;
+      note("endless:press", diag.reloadButton);
+      flushDiag();
+      const before = countFeedItems();
+      try {
+        button.click();
+      } catch (error) {
         endlessRunning = false;
-        diag.pressesThatGrew += 1;
-        snapshotPage();
-        flushDiag();
-        clearFeedStatus();
-        // Top up again if there is still not enough below the fold.
-        if (feedIsExhausted() || feedBufferScreens() < LOOKAHEAD.targetScreens) {
-          scheduleEndlessRecovery();
-        }
         return;
       }
-      if (Date.now() >= deadline) {
-        // The button produced nothing. Stop after a couple of attempts instead
-        // of pressing forever.
-        endlessEmptyPresses += 1;
-        endlessRunning = false;
-        note("endless:press-gave-nothing");
-        snapshotPage();
-        flushDiag(true);
-        if (endlessEmptyPresses >= 2) {
-          diag.gaveUp = true;
-          showFeedStatus("YouTube не даёт продолжить ленту", true);
-        } else {
+      const deadline = Date.now() + ENDLESS.settleMs;
+      const poll = () => {
+        if (countFeedItems() > before) {
+          endlessRunning = false;
+          diag.pressesThatGrew += 1;
+          snapshotPage();
+          flushDiag(true);
           clearFeedStatus();
-          scheduleEndlessRecovery();
+          return;
         }
-        return;
-      }
+        if (Date.now() >= deadline) {
+          endlessRunning = false;
+          diag.pressesThatGrew += 0;
+          note("endless:press-gave-nothing");
+          snapshotPage();
+          flushDiag(true);
+          // The button did nothing, so fall through to refilling directly.
+          refillHomeFeed();
+          return;
+        }
+        window.setTimeout(poll, ENDLESS.settlePollMs);
+      };
       window.setTimeout(poll, ENDLESS.settlePollMs);
-    };
-    window.setTimeout(poll, ENDLESS.settlePollMs);
+      return;
+    }
+
+    // No usable control at the end of the feed. Refill it.
+    diag.presses = endlessPresses;
+    note("endless:refill");
+    refillHomeFeed();
   }
 
   function connectHome() {

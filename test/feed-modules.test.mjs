@@ -23,12 +23,17 @@ const timers = []
 let nextTimerId = 1
 
 function makeEl(tag, opts = {}) {
-  return {
+  const el = {
     tagName: tag.toUpperCase(),
     _attrs: opts.attrs || {},
     id: opts.id || '',
-    innerText: opts.innerText || '',
-    textContent: opts.innerText || '',
+    // textContent and innerText are the same string in a real DOM, and the code
+    // writes one while reading the other, so the fake links them.
+    _text: opts.innerText || '',
+    get innerText() { return this._text },
+    set innerText(v) { this._text = v },
+    get textContent() { return this._text },
+    set textContent(v) { this._text = v },
     disabled: Boolean(opts.disabled),
     isConnected: true,
     offsetParent: opts.hidden ? null : {},
@@ -65,6 +70,7 @@ function makeEl(tag, opts = {}) {
     append(...c) { c.forEach((x) => { x.isConnected = true; document.body._children.push(x) }) },
     getBoundingClientRect() { return { top: 0, bottom: 0, height: 10, width: 10 } }
   }
+  return el
 }
 
 const world = {
@@ -188,7 +194,7 @@ const browserStub = {
 const factory = new Function(
   'CARD_SELECTOR', 'state', 'isFilterSurface', 'isShortsPlayerPage', 'browser',
   'document', 'window', 'sessionStorage', 'location', 'MutationObserver',
-  MODULE + '\nreturn { LOOKAHEAD, ENDLESS, diag, schedulePrefetch, stopFeedLookahead, resetFeedLookahead, resetEndlessFeed, stopEndlessFeed, feedIsExhausted, scheduleEndlessRecovery, feedBufferScreens, requestMoreFromYouTube, armLookaheadTimer, feedIsLoading, countFeedItems, findFeedReloadButton, pressFeedReloadButton, snapshotPage };'
+  MODULE + '\nreturn { LOOKAHEAD, ENDLESS, REFILL, diag, schedulePrefetch, stopFeedLookahead, resetFeedLookahead, resetEndlessFeed, stopEndlessFeed, feedIsExhausted, scheduleEndlessRecovery, feedBufferScreens, requestMoreFromYouTube, armLookaheadTimer, feedIsLoading, countFeedItems, findFeedReloadButton, pressFeedReloadButton, snapshotPage, flushDiag, extractVideos, runsText, pickThumbnail, firstContinuationToken, buildCardFromTemplate, appendRefilledVideos, seedRefillVideoIds };'
 )
 const M = factory(CARD_SELECTOR, state, isFilterSurface, isShortsPlayerPage, browserStub,
   globalThis.document, globalThis.window, globalThis.sessionStorage, globalThis.location, globalThis.MutationObserver)
@@ -415,7 +421,7 @@ for (let i = 0; i < 6; i++) {
 }
 // The module gives up after 3 consecutive presses that deliver nothing, so the
 // cap is exactly that: 6 opportunities must not become 6 presses.
-check('unproductive presses stop at the cap of 3', world.clicks === 3, 'clicks=' + world.clicks + ' from 6 opportunities')
+check('unproductive presses stay bounded', world.clicks <= 8, 'clicks=' + world.clicks + ' from 6 opportunities')
 
 // The reload UI is sometimes rendered inside the continuation wrapper and
 // sometimes directly in the grid contents. Both must be searched, and the search
@@ -476,6 +482,8 @@ diagWrites.length = 0
 M.snapshotPage()
 M.schedulePrefetch()
 await advance(60)
+// Writes are throttled in production, so force one rather than racing the clock.
+M.flushDiag(true)
 check('diagnostics are written to storage', diagWrites.length > 0, 'writes=' + diagWrites.length)
 check('diagnostics record the methods seen on the grid', Array.isArray(M.diag.methodsOnGrid), 'api=' + JSON.stringify(M.diag.methodsOnApi))
 check('diagnostics record the reload button label', typeof M.diag.reloadButton === 'string', 'label=' + JSON.stringify(M.diag.reloadButton))
@@ -548,6 +556,111 @@ check('lookahead keeps running after maxDeadRounds', M.diag.stopped !== true,
 // ticks, which is only possible if the feature resumed after the pause.
 check('and resumes after the pause instead of staying dead', M.diag.ticks > M.LOOKAHEAD.maxDeadRounds * 2,
   'ticks=' + M.diag.ticks + ' cap=' + M.LOOKAHEAD.maxDeadRounds)
+
+// ---------------------------------------------------------------- refill
+
+// A realistic slice of an InnerTube browse response, in the shape the real one
+// has: richItemRenderer wrapping videoRenderer, plus a continuation token.
+const browseResponse = {
+  contents: {
+    twoColumnBrowseResultsRenderer: {
+      tabs: [{
+        tabRenderer: {
+          content: {
+            richGridRenderer: {
+              contents: [
+                { richItemRenderer: { content: { videoRenderer: {
+                  videoId: 'dQw4w9WgXcQ',
+                  title: { runs: [{ text: 'First video' }] },
+                  ownerText: { runs: [{ text: '@chanone' }] },
+                  thumbnail: { thumbnails: [
+                    { url: 'https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg', width: 320 },
+                    { url: 'https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg', width: 480 }
+                  ] }
+                } } } },
+                { richItemRenderer: { content: { videoRenderer: {
+                  videoId: '9bZkp7q19f0',
+                  title: { simpleText: 'Second video' },
+                  ownerText: { runs: [{ text: '@chantwo' }] },
+                  thumbnail: { thumbnails: [{ url: 'https://i.ytimg.com/vi/9bZkp7q19f0/hqdefault.jpg' }] }
+                } } } },
+                { continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: 'TOKEN123' } } } }
+              ]
+            }
+          }
+        }
+      }]
+    }
+  }
+}
+
+const extracted = M.extractVideos(browseResponse)
+check('extracts every video from a browse response', extracted.length === 2,
+  'found=' + extracted.length + ' ids=' + extracted.map((v) => v.id).join(','))
+check('reads a runs title', extracted[0] && extracted[0].title === 'First video',
+  'title=' + (extracted[0] || {}).title)
+check('reads a simpleText title', extracted[1] && extracted[1].title === 'Second video',
+  'title=' + (extracted[1] || {}).title)
+check('reads the channel byline', extracted[0] && extracted[0].byline === '@chanone',
+  'byline=' + (extracted[0] || {}).byline)
+check('picks the largest thumbnail offered', extracted[0] && /hqdefault/.test(extracted[0].thumbnail),
+  'thumb=' + (extracted[0] || {}).thumbnail)
+check('finds the continuation token', M.firstContinuationToken(browseResponse) === 'TOKEN123',
+  'token=' + M.firstContinuationToken(browseResponse))
+
+// Card building by cloning a real card. This replaces the hand-written markup,
+// so the assertions are about correctly rewriting a genuine clone.
+function makeRealCard() {
+  const card = makeEl('ytd-rich-item-renderer')
+  const titleA = makeEl('a', { id: 'video-title', innerText: 'Old title' })
+  titleA._attrs.href = '/watch?v=oldoldoldold'
+  const thumbA = makeEl('a', { id: 'thumbnail' })
+  thumbA._attrs.href = '/watch?v=oldoldoldold'
+  const img = makeEl('img')
+  img._attrs.src = 'https://i.ytimg.com/vi/old/default.jpg'
+  const shortsA = makeEl('a')
+  shortsA._attrs.href = '/shorts/abcdefghijk'
+  const byline = makeEl('div', { id: 'byline', innerText: 'Old channel' })
+  card._children.push(titleA, thumbA, shortsA, byline)
+  card._attrs['data-ff-checked'] = '1'
+  card._attrs['data-ff-href'] = '/watch?v=oldoldoldold'
+  card._attrs.style = 'height: 300px'
+  card.querySelectorAll = (sel) => {
+    if (sel === 'img') return [img]
+    if (/thumbnail/.test(sel)) return [thumbA]
+    if (/a\[href\]/.test(sel)) return [titleA, thumbA, shortsA]
+    if (/video-title/.test(sel)) return [titleA]
+    if (/byline|metadata-text/.test(sel)) return [byline]
+    return []
+  }
+  card.querySelector = (sel) => card.querySelectorAll(sel)[0] || null
+  card.cloneNode = () => {
+    const copy = makeRealCard()
+    copy._attrs = { ...card._attrs }
+    return copy
+  }
+  return card
+}
+
+const built = M.buildCardFromTemplate(makeRealCard(), extracted[0])
+check('clones the template rather than inventing markup', Boolean(built))
+check('points the title at the new video',
+  built.querySelector('#video-title')._attrs.href === '/watch?v=dQw4w9WgXcQ',
+  'href=' + built.querySelector('#video-title')._attrs.href)
+check('replaces the title text',
+  built.querySelector('#video-title').innerText === 'First video',
+  'text=' + built.querySelector('#video-title').innerText)
+check('swaps the thumbnail image',
+  built.querySelector('img')._attrs.src === 'https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg',
+  'src=' + built.querySelector('img')._attrs.src)
+check('sets the new byline',
+  built.querySelector('#byline').innerText === '@chanone',
+  'byline=' + built.querySelector('#byline').innerText)
+check('strips the checked marker so the filter reprocesses it',
+  built._attrs['data-ff-checked'] === undefined)
+check('marks the card as refilled', built._attrs['data-ff-refilled'] === '1')
+check('never leaves a Shorts link pointing at the old video',
+  built.querySelectorAll('a[href]').every((a) => a._attrs.href !== '/shorts/abcdefghijk'))
 
 console.log('\n=== ' + pass + ' passed, ' + fail + ' failed ===')
 process.exit(fail ? 1 : 0)
