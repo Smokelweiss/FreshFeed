@@ -8,10 +8,28 @@
 </head>
 <body class="options-page">
   <main>
-    <h1>FreshFeed settings</h1>
+    <header class="app-header">
+      <h1>FreshFeed settings</h1>
+      <div class="master-row" role="group" aria-label="Extension master switch">
+        <span id="master-label">Filtering</span>
+        <label class="switch-row master">
+          <span class="sr-only">Enable FreshFeed</span>
+          <input id="enabled" type="checkbox" aria-labelledby="master-label">
+          <span class="switch" aria-hidden="true"></span>
+        </label>
+      </div>
+    </header>
 
-    <section class="settings-section">
+    <nav class="tabs" role="tablist" aria-label="Settings sections">
+      <button class="tab" role="tab" id="tab-filters" aria-controls="panel-filters" aria-selected="true" type="button">Filters</button>
+      <button class="tab" role="tab" id="tab-subscriptions" aria-controls="panel-subscriptions" aria-selected="false" type="button">Subscriptions</button>
+      <button class="tab" role="tab" id="tab-blacklist" aria-controls="panel-blacklist" aria-selected="false" type="button">Blacklist</button>
+      <button class="tab" role="tab" id="tab-diagnostics" aria-controls="panel-diagnostics" aria-selected="false" type="button">Diagnostics</button>
+    </nav>
+
+    <section class="settings-section panel" id="panel-filters" role="tabpanel" aria-labelledby="tab-filters">
       <h2>Feed filters</h2>
+      <p class="help">Shorts are only hidden in feeds and recommendations. The Shorts player page (<code>/shorts/</code>) is never modified.</p>
       <label class="switch-row"><span>Hide Subscribed Channels</span><input id="hide-subscribed" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
       <label class="switch-row"><span>Hide Shorts</span><input id="hide-shorts" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
       <label class="switch-row"><span>Hide YouTube Playables</span><input id="hide-playables" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
@@ -19,33 +37,55 @@
       <label class="switch-row"><span>Hide Members-only videos</span><input id="hide-members-only" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
       <label class="switch-row"><span>Hide Mix / Radio playlists</span><input id="hide-mix-radio" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
 
+      <h3>Promoted &amp; generated blocks</h3>
+      <p class="help">Extra blocks YouTube inserts into the feed. All are off by default.</p>
+      <label class="switch-row"><span>Hide live &amp; upcoming streams</span><input id="hide-live-streams" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
+      <label class="switch-row"><span>Hide community posts</span><input id="hide-community-posts" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
+      <label class="switch-row"><span>Hide Movies &amp; storefront shelves</span><input id="hide-storefront-shelves" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
+      <label class="switch-row"><span>Hide brand &amp; promo banners</span><input id="hide-promo-shelves" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
+      <label class="switch-row"><span>Hide surveys &amp; upsell popups</span><input id="hide-surveys" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
+      <label class="switch-row"><span>Hide "More topics" shelves</span><input id="hide-topic-shelves" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
+      <label class="switch-row"><span>Hide all YouTube-generated topic shelves</span><input id="hide-generated-shelves" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
+      <p class="help"><strong>Hide all YouTube-generated topic shelves</strong> is a catch-all: it removes any titled shelf YouTube assembled around a subject (for example "Популярное в вашем регионе"). Shelves without a heading are left alone, since those are your own feed. Shorts and "More topics" keep their own settings, so this one never overrides them.</p>
+      <label class="switch-row"><span>Smooth scroll (background lookahead)</span><input id="feed-lookahead" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
+      <label class="switch-row"><span>Endless feed (auto-refill when YouTube stops)</span><input id="endless-feed" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
+      <p class="help"><strong>Endless feed</strong> keeps the home feed going. YouTube normally hands out a limited number of pages per visit and then stops until you reload; this fetches a fresh batch in the background and appends only videos you have not seen yet. It stops on its own after a few empty attempts, so it will not loop forever.</p>
+      <p class="help">Smooth scroll quietly loads a few more rows below the fold so the home feed keeps flowing after videos are hidden. It only acts while you are scrolling and stops on its own when the feed is full.</p>
+
       <h3>Upload date filter</h3>
       <label class="switch-row"><span>Enable upload date filter</span><input id="filter-upload-date" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
       <div id="upload-date-options" class="filter-options" hidden>
-        <label>Mode <select id="upload-date-mode"><option value="onlyPast">Only past</option><option value="olderThan">Block older than</option><option value="between">Between</option></select></label>
-        <label>Value <input id="upload-date-value" class="inline-number" type="number" min="1" max="3650" step="1"><select id="upload-date-unit"><option value="days">days</option><option value="weeks">weeks</option><option value="months">months</option><option value="years">years</option></select></label>
-        <label id="upload-date-between">From <input id="upload-date-min" class="inline-number" type="number" min="1" max="3650" step="1"> to <input id="upload-date-max" class="inline-number" type="number" min="1" max="3650" step="1"> <span class="unit-label">days</span></label>
+        <label><span>Mode</span> <select id="upload-date-mode"><option value="onlyPast">Only past</option><option value="olderThan">Block older than</option><option value="between">Between</option></select></label>
+        <label><span>Value</span> <input id="upload-date-value" class="inline-number" type="number" min="1" max="3650" step="1"><select id="upload-date-unit"><option value="days">days</option><option value="weeks">weeks</option><option value="months">months</option><option value="years">years</option></select></label>
+        <label id="upload-date-between" hidden><span>From</span> <input id="upload-date-min" class="inline-number" type="number" min="1" max="3650" step="1"> <span>to</span> <input id="upload-date-max" class="inline-number" type="number" min="1" max="3650" step="1"> <span class="unit-label">days</span></label>
       </div>
 
       <h3>Duration filter</h3>
       <label class="switch-row"><span>Enable duration filter</span><input id="filter-duration" type="checkbox"><span class="switch" aria-hidden="true"></span></label>
       <div id="duration-options" class="filter-options" hidden>
-        <label>Mode <select id="duration-mode"><option value="onlyShorter">Only shorter than</option><option value="longerThan">Block longer than</option><option value="between">Between</option></select></label>
-        <label>Value <input id="duration-value" class="inline-number" type="number" min="1" max="100000" step="1"><select id="duration-unit"><option value="seconds">seconds</option><option value="minutes">minutes</option><option value="hours">hours</option><option value="days">days</option></select></label>
-        <label id="duration-between">From <input id="duration-min" class="inline-number" type="number" min="1" max="100000" step="1"> to <input id="duration-max" class="inline-number" type="number" min="1" max="100000" step="1"> <span class="duration-unit-label">minutes</span></label>
+        <label><span>Mode</span> <select id="duration-mode"><option value="onlyShorter">Only shorter than</option><option value="longerThan">Block longer than</option><option value="between">Between</option></select></label>
+        <label><span>Value</span> <input id="duration-value" class="inline-number" type="number" min="1" max="100000" step="1"><select id="duration-unit"><option value="seconds">seconds</option><option value="minutes">minutes</option><option value="hours">hours</option><option value="days">days</option></select></label>
+        <label id="duration-between" hidden><span>From</span> <input id="duration-min" class="inline-number" type="number" min="1" max="100000" step="1"> <span>to</span> <input id="duration-max" class="inline-number" type="number" min="1" max="100000" step="1"> <span class="duration-unit-label">minutes</span></label>
       </div>
+      <p class="empty-note" id="filters-summary">No filters enabled.</p>
     </section>
 
-    <section class="settings-section">
+    <section class="settings-section panel" id="panel-subscriptions" role="tabpanel" aria-labelledby="tab-subscriptions" hidden>
       <h2>Subscription data</h2>
       <p id="count">Subscribed: 0 · Blacklisted: 0</p>
       <p id="synced">Last sync: never</p>
       <div id="progress-wrap" hidden><div class="progress-bar"><span></span></div><p id="progress-text">Syncing…</p></div>
-      <button id="sync" type="button">Sync subscriptions</button>
-      <button id="clear" class="secondary" type="button">Clear subscribed channels</button>
+      <div class="button-row">
+        <button id="sync" type="button">Sync subscriptions</button>
+        <button id="clear" class="secondary" type="button">Clear subscribed channels</button>
+      </div>
+      <details class="disclosure">
+        <summary>Show subscribed channels</summary>
+        <div id="subscribed-list" class="channel-list"></div>
+      </details>
     </section>
 
-    <section class="settings-section">
+    <section class="settings-section panel" id="panel-blacklist" role="tabpanel" aria-labelledby="tab-blacklist" hidden>
       <h2>Blacklist</h2>
       <p class="help">Import one channel per line, or use JSON/CSV exported by another extension. YouTube channel URLs, channel IDs, @handles, and /c/ or /user/ URLs are supported.</p>
       <label class="field-label" for="blacklist-format">Export format</label>
@@ -68,9 +108,13 @@ UC..."></textarea>
       </div>
       <label class="file-picker"><span>Import a file</span><input id="blacklist-file" type="file" accept=".txt,.csv,.json,text/plain,text/csv,application/json"></label>
       <p id="blacklist-status" class="status" role="status" aria-live="polite"></p>
+      <details class="disclosure">
+        <summary>Manage blacklisted channels (<span id="blacklist-count">0</span>)</summary>
+        <div id="blacklist-list" class="channel-list"></div>
+      </details>
     </section>
 
-    <section class="settings-section diagnostics">
+    <section class="settings-section panel diagnostics" id="panel-diagnostics" role="tabpanel" aria-labelledby="tab-diagnostics" hidden>
       <h2>Diagnostics</h2>
       <pre id="result">No sync details.</pre>
       <button id="copy-result" class="secondary" type="button">Copy details</button>

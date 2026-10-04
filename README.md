@@ -4,55 +4,85 @@
 
 # FreshFeed
 
-FreshFeed hides videos and Shorts from channels you subscribe to on YouTube.
+**FreshFeed cleans up your YouTube feed.** It hides videos from channels you
+already follow, channels you do not want to see, Shorts, Playables, and other
+types of content you choose to filter.
 
-## Synchronization
+It runs locally in Firefox: there are no accounts, analytics, or third-party
+servers.
 
-FreshFeed keeps the list current in three ways:
+## What it does
 
-1. On the first YouTube page opened after installation, it automatically imports the existing subscriptions.
-2. Clicking YouTube's Subscribe or Unsubscribe button immediately adds or removes that channel.
-3. The **Sync subscriptions** button can manually re-import the complete subscription list.
+- Hides videos from your subscribed channels.
+- Keeps a separate blacklist for channels you never want in the feed.
+- Adds a **Blacklist** action to YouTube's three-dot video menus.
+- Hides Shorts, YouTube Playables, members-only videos, and Mix/Radio items.
+- Filters videos by upload date or duration.
+- Updates subscriptions immediately when you subscribe or unsubscribe.
+- Imports and exports blacklist entries as plain text, JSON, or CSV.
+- Keeps working with large subscription lists using Firefox local storage.
 
-The primary import reads YouTube's subscription data and continuation pages directly, so it does not need to scroll through hundreds of rendered cards. A page-based fallback remains available if YouTube changes its internal data format.
+## Quick start
 
-Filtering uses a compiled identity index for channel IDs, `@handles`, and legacy `c/...` or `user/...` URLs. When YouTube exposes channel data in JSON, FreshFeed removes matching renderers before they are displayed; the incremental DOM observer remains as a fallback for recycled or unsupported renderers.
+1. Install FreshFeed from Firefox Add-ons.
+2. Open YouTube and let FreshFeed import your subscriptions.
+3. Click the FreshFeed toolbar button to enable or disable common filters.
+4. Open **Extension settings** for all filters, synchronization, diagnostics,
+   and blacklist import/export.
 
-## Features
+On a new installation, only these filters are enabled:
 
-- Hide subscribed channels' videos and Shorts on YouTube Home.
-- Automatic first synchronization when YouTube is opened after installation.
-- Immediate updates after Subscribe and Unsubscribe actions.
-- YouTube's native “Not interested” action remains active; FreshFeed also adds the channel to a separate local blacklist after the click.
-- Manual synchronization with progress reporting.
-- No telemetry and no third-party servers.
-- Large local lists use Firefox's unlimited local-storage quota and set-backed lookups rather than scanning every saved channel for every card.
+- **Hide Subscribed Channels**
+- **Hide Shorts**
+- **Hide YouTube Playables**
+- **Hide Blacklisted**
 
-The options page reports the number of subscribed channels by canonical YouTube
-channel ID, rather than adding IDs, handles, and display names together.
+Everything else can be enabled when you need it.
 
-The popup provides quick filtering switches for Subscribed Channels, Shorts,
-Playables, Blacklisted channels, Members-only videos, and Mix/Radio playlists.
-Detailed
-settings for every filter, subscription synchronization, list clearing, counts,
-blacklist management, import/export, and diagnostics are available from
-**Extension settings**. Subscribe and
-Unsubscribe changes are always synchronized; there is no separate switch.
-Channels added through YouTube's **Not recommend this channel** action are
-stored in the blacklist. Their filtering is controlled by **Hide Blacklisted**;
-turning it off preserves the saved blacklist without hiding those videos.
+## How synchronization works
 
-On a fresh installation, only **Hide Subscribed Channels**, **Hide Shorts**,
-**Hide YouTube Playables**, and **Hide Blacklisted** are enabled. Additional
-filters are off until enabled. Upload-date and duration filters support
-threshold and between-range modes with configurable units. The settings page
-can import blacklist entries from newline lists,
-JSON, or CSV, and export a FilterTube-compatible newline list plus JSON/CSV
-variants. Imports can either merge with or replace the current blacklist. On a
-video watch page, the three-dot menu includes a native-styled **Hide this
-channel** action that adds the current channel to the FreshFeed blacklist.
+FreshFeed imports the current subscription list when YouTube is first opened.
+Subscribe and Unsubscribe actions are applied immediately. The **Sync
+subscriptions** button in Extension settings can be used to re-import the
+complete list manually.
 
-The popup lists the active filtering capabilities. If YouTube returns an invalid or expired continuation page during synchronization, FreshFeed skips that page, keeps collecting valid pages, and reports how many pages were unavailable instead of discarding the entire synchronization.
+The import reads YouTube's subscription data directly instead of requiring you
+to scroll through the entire subscriptions page. If YouTube returns an invalid
+continuation page, FreshFeed skips that page, keeps valid results, and reports
+the problem in diagnostics.
+
+## Blacklist and compatibility
+
+You can add a channel by using YouTube's **Blacklist** menu action or by
+importing a list in Extension settings. The importer understands:
+
+- YouTube channel URLs
+- `UC...` channel IDs
+- `@handles`
+- `/c/...` and `/user/...` URLs
+- JSON and CSV files
+
+Plain-text export uses one entry per line and is designed to be compatible with
+FilterTube-style channel lists.
+
+## Privacy and permissions
+
+FreshFeed stores settings and channel lists only in Firefox
+`storage.local`. It communicates only with YouTube pages that you open.
+It does not collect telemetry or send data to a FreshFeed server.
+
+## Requirements
+
+- Firefox 140 or newer
+- A signed-in YouTube account
+
+## Temporary installation for testing
+
+1. Open `about:debugging#/runtime/this-firefox`.
+2. Click **Load Temporary Add-on**.
+3. Select `manifest.json` or the signed package.
+
+Temporary add-ons are removed when Firefox restarts.
 
 ## Requirements
 

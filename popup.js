@@ -8,6 +8,15 @@
     hideBlacklisted: document.getElementById("hide-blacklisted"),
     hideMembersOnly: document.getElementById("hide-members-only"),
     hideMixRadio: document.getElementById("hide-mix-radio"),
+    hideTopicShelves: document.getElementById("hide-topic-shelves"),
+    hideLiveStreams: document.getElementById("hide-live-streams"),
+    hideCommunityPosts: document.getElementById("hide-community-posts"),
+    hideStorefrontShelves: document.getElementById("hide-storefront-shelves"),
+    hidePromoShelves: document.getElementById("hide-promo-shelves"),
+    hideSurveys: document.getElementById("hide-surveys"),
+    hideGeneratedShelves: document.getElementById("hide-generated-shelves"),
+    endlessFeed: document.getElementById("endless-feed"),
+    feedLookahead: document.getElementById("feed-lookahead"),
     filterUploadDate: document.getElementById("filter-upload-date"),
     filterDuration: document.getElementById("filter-duration")
   };
@@ -32,6 +41,15 @@
     hideBlacklisted: true,
     hideMembersOnly: false,
     hideMixRadio: false,
+    hideTopicShelves: false,
+    hideLiveStreams: false,
+    hideCommunityPosts: false,
+    hideStorefrontShelves: false,
+    hidePromoShelves: false,
+    hideSurveys: false,
+    hideGeneratedShelves: false,
+    endlessFeed: true,
+    feedLookahead: true,
     filterUploadDate: false,
     uploadDateMode: "olderThan",
     uploadDateUnit: "days",
@@ -51,13 +69,18 @@
   const durationBetween = document.getElementById("duration-between");
   const error = document.getElementById("error");
   const settingsButton = document.getElementById("settings");
+  const enabledControl = document.getElementById("enabled");
 
   async function refresh() {
-    const data = await browser.storage.local.get([...Object.keys(settingControls), "lastSyncResult"]);
+    const data = await browser.storage.local.get([...Object.keys(settingControls), "enabled", "lastSyncResult"]);
     const settings = { ...defaults, ...data };
+    enabledControl.checked = data.enabled !== false;
     Object.entries(settingControls).forEach(([key, control]) => {
       control.checked = settings[key] === true;
     });
+    // The whole form is inert while the master switch is off, which makes the
+    // popup's state readable at a glance.
+    document.body.classList.toggle("disabled", !enabledControl.checked);
     Object.entries(numericControls).forEach(([key, control]) => {
       control.value = Number(settings[key]) || (key.includes("Min") ? 1 : key.includes("Date") ? 30 : 60);
     });
@@ -90,6 +113,7 @@
   Object.entries(selectControls).forEach(([key, control]) => {
     control.addEventListener("change", () => browser.storage.local.set({ [key]: control.value }).then(refresh));
   });
+  enabledControl.addEventListener("change", () => browser.storage.local.set({ enabled: enabledControl.checked }).then(refresh));
   settingsButton.addEventListener("click", () => browser.runtime.openOptionsPage());
   browser.storage.onChanged.addListener(refresh);
   refresh();

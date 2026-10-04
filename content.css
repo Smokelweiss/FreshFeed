@@ -1,4 +1,18 @@
-[data-ff-hidden="1"] {
+[data-ff-hidden="1"],
+[data-ff-topics-hidden="1"],
+[data-ff-junk-hidden="1"] {
+  display: none !important;
+}
+
+/* Anti-flash: a card whose decision is still pending must not paint. Without
+   this the card renders fully, then vanishes ~160ms later, which is the
+   visible flicker. Cards are marked data-ff-pending the moment they enter the
+   DOM and are hidden only when they contain no matching channel data.
+
+   display:none (not visibility:hidden) so a placeholder also gives up its
+   layout space. visibility:hidden leaves the grid cell reserved, which shows
+   up as the empty grey blocks and makes the grid jump when they resolve. */
+[data-ff-pending="1"] {
   display: none !important;
 }
 
