@@ -115,8 +115,7 @@
     hidePromoShelves: false,
     hideSurveys: false,
     hideGeneratedShelves: false,
-    endlessFeed: true,
-    feedLookahead: true,
+    bgPreload: true,
     filterUploadDate: false,
     uploadDateMode: "olderThan",
     uploadDateUnit: "days",
@@ -954,13 +953,6 @@
         markCard(card);
       }
     });
-    // Keep a buffer of feed content ready below the fold.
-    schedulePrefetch();
-    // Watch for the feed genuinely running out. The recovery decision lives
-    // inside recoverFeed, so scheduling on every scan is cheap: it early-returns
-    // while there is still content, and the timer slot keeps it to one pending
-    // check no matter how often the mutation observer fires.
-    scheduleEndlessRecovery();
   }
 
   function scheduleHomeScan() {
@@ -970,11 +962,19 @@
     homeTimer = setTimeout(() => {
       homeTimer = null;
       scanHome();
+      // Keep the filter observable in Diagnostics without re-adding any of the
+      // removed feed-extension machinery.
+      if (diag.page !== location.pathname) diag.page = location.pathname;
+      diag.checked = document.querySelectorAll("[data-ff-checked='1']").length;
+      diag.hidden = document.querySelectorAll("[data-ff-hidden='1']").length;
+      diagDirty = true;
+      flushDiag();
     }, 150);
   }
 
   function disconnectHome() {
     homeActive = false;
+    resetPreload();
     if (homeObserver) {
       homeObserver.disconnect();
       homeObserver = null;
@@ -985,205 +985,219 @@
       card.removeAttribute("data-ff-pending-attempts");
     });
     pendingCards.clear();
-    stopFeedLookahead();
-    stopEndlessFeed();
     clearHiddenCards(false);
   }
 
-  // --- Background lookahead -------------------------------------------------
-  // YouTube only loads more home-feed items when the sentinel near the bottom
-  // becomes visible. Because FreshFeed then hides most of what arrives, the
-  // feed can hit its end long before the viewport fills, and the user sees
-  // "loading". This nudges that sentinel into view ahead of time so a buffer of
-  // items is always ready.
+  // --- Background feed preload ----------------------------------------------
+  // The request: load YouTube's own feed to the end in the background, before
+  // the user ever scrolls there, so scrolling down never waits. This does NOT
+  // fabricate cards and does NOT talk to InnerTube: it only wakes YouTube's
+  // own continuation mechanism (the sentinel at the end of the grid) without
+  // moving the user's scroll position.
   //
-  // Guard rails (all required):
-  //   * a hard cap on how many nudge rounds may run per page load
-  //   * a cooldown between rounds, so loading can never free-run
-  //   * it only runs while the user is near the bottom, so an idle tab never
-  //     triggers loading on its own
-  //   * it stops entirely once the feed stops growing
-  const LOOKAHEAD = {
+  // No-viewport nudge: a transform pulls the sentinel up into the viewport,
+  // which fires YouTube's IntersectionObserver and triggers its own fetch and
+  // render; the transform is restored on the next frame. A one-pixel scroll +
+  // restore covers builds that also gate on the real scroll position. The
+  // user's scrollTop/scrollHeight are never changed, so nothing visibly moves
+  // and the feed grows out of sight.
+  const PRELOAD = {
     enabled: true,
-    // How many viewport-heights of content to keep below the fold.
-    targetScreens: 4,
-    // How long one round waits for YouTube to actually append, in ms.
-    // YouTube needs 1-3s in practice. The old 700ms single-shot verdict could
-    // not tell a slow server from a dead end, so three rounds of perfectly
-    // normal latency looked like three dead rounds and shut the whole feature
-    // off for the rest of the page load.
+    // Tick of the self-sustaining timer; also the minimum gap between nudges,
+    // so the loop can never free-run faster than a human could scroll.
+    tickMs: 1200,
+    // How much feed to keep beyond the fold (in viewport heights). When this
+    // much is already buffered, the loop waits instead of loading pages the
+    // user cannot reach yet.
+    targetScreens: 6,
+    // How long one nudge waits for YouTube to actually append a page.
     settleMs: 6000,
-    // Poll interval inside that settle window.
-    settlePollMs: 300,
-    // Tick of the self-sustaining timer. This doubles as the minimum gap
-    // between requests, so the loop still cannot free-run.
-    tickMs: 900,
-    // Give up on the whole page load only after this many consecutive rounds
-    // that YouTube genuinely could not answer. Reaching it now triggers a long
-    // pause and another attempt, never a permanent shutdown.
+    settlePollMs: 250,
+    // Pause for a while only after this many consecutive rounds where YouTube
+    // delivered nothing. Reaching it means the feed genuinely ended (or the
+    // build has no native pagination); it pauses and tries again later, and
+    // never shuts the loop off for good.
     maxDeadRounds: 6,
-    // How long to wait after a run of dead rounds before trying again.
     pauseAfterDeadMs: 30000
   };
 
-  let lookaheadTimer = null;
-  let lookaheadRounds = 0;
-  let lookaheadDeadRounds = 0;
-  let lookaheadLastRun = 0;
-  let lookaheadRunning = false;
-  let lookaheadActive = false;
-  let lookaheadScrollHandler = null;
+  // The preload health lives on the diag snapshot (preloadActive/...), so the
+  // options page and the tests read the same state the code mutates.
+  let preloadTimer = null;
 
-  function countFeedItems() {
+  function resetPreload() {
+    diag.preloadActive = false;
+    diag.preloadRounds = 0;
+    diag.preloadDeadRounds = 0;
+    diag.preloadGrowth = 0;
+    diag.preloadHook = "";
+    if (preloadTimer) {
+      clearTimeout(preloadTimer);
+      preloadTimer = null;
+    }
+  }
+
+  function stopPreload(gate) {
+    diag.preloadActive = false;
+    if (gate) diag.preloadGate = gate;
+    if (preloadTimer) {
+      clearTimeout(preloadTimer);
+      preloadTimer = null;
+    }
+  }
+
+  function feedItemCount() {
     return document.querySelectorAll(CARD_SELECTOR).length;
   }
 
-  function findFeedContinuation() {
-    // The sentinel YouTube uses to trigger the next page. Different surfaces
-    // name it differently, so try the known shapes.
-    return document.querySelector(
-      "ytd-continuation-item-renderer, #continuations ytd-continuation-item-renderer, " +
-      "ytd-rich-grid-renderer #continuations, ytd-item-section-continuations, " +
-      "ytd-continuation-item-renderer #ghost-cards, #continuation-item"
-    ) || document.querySelector("ytd-continuation-item-renderer");
+  // The element YouTube watches to decide to fetch the next page.
+  function findFeedSentinel() {
+    return (
+      document.querySelector(
+        "ytd-rich-grid-renderer ytd-continuation-item-renderer, " +
+        "ytd-rich-grid-renderer #continuations, " +
+        "ytd-item-section-continuations, " +
+        "ytd-continuation-item-renderer, " +
+        "#continuation-item"
+      ) || null
+    );
   }
 
-  // Markers that mean "YouTube is fetching right now". While any of these is
-  // present the feed is busy, not finished. The previous version treated a
-  // missing continuation element as "nothing left to load" even in the middle
-  // of a request, and banked that as a dead round without ever trying.
-  const LOADING_SELECTOR = [
-    "ytd-continuation-item-renderer[loading]",
-    "ytd-progress-spinner",
-    "ytd-loading-spinner",
-    "#continuations [loading]",
-    "[aria-busy='true']"
-  ].join(", ");
-
-  function feedIsLoading() {
-    return Boolean(document.querySelector(LOADING_SELECTOR));
+  // Wake YouTube's own pagination without moving the user. Returns true when a
+  // hook existed and was nudged; false when this build has no sentinel.
+  function nudgeNativeContinuation() {
+    const sentinel = findFeedSentinel();
+    diag.preloadHook = sentinel ? "sentinel" : "none";
+    if (!sentinel) return false;
+    const previous = sentinel.style.transform;
+    try {
+      sentinel.style.transform = "translateY(-100vh)";
+    } catch (error) {
+      return false;
+    }
+    window.requestAnimationFrame(() => {
+      sentinel.style.transform = previous;
+    });
+    // One-pixel scroll + restore for builds that gate on the real scroll
+    // position rather than on the observer alone.
+    const doc = document.scrollingElement || document.documentElement;
+    if (doc && doc.scrollTop > 0) {
+      const before = doc.scrollTop;
+      doc.scrollTop = before - 1;
+      window.requestAnimationFrame(() => {
+        doc.scrollTop = before;
+      });
+    }
+    return true;
   }
 
-  // How much content is left below the fold, expressed in viewport-heights.
-  function feedBufferScreens() {
+  function preloadScreensPending() {
     const doc = document.scrollingElement || document.documentElement;
     if (!doc) return Infinity;
     const remaining = doc.scrollHeight - (doc.scrollTop + window.innerHeight);
     return remaining / Math.max(1, window.innerHeight);
   }
 
-  function stopFeedLookahead(gate) {
-    lookaheadActive = false;
-    // Diagnostics must explain a stalled feature, and the only way it can be
-    // switched off on this build is through one of the gates in
-    // schedulePrefetch. Recording the reason turns "no ticks" into "the Smooth
-    // scroll toggle is OFF" instead of an unsolvable mystery.
-    diag.lookaheadOn = false;
-    if (gate) diag.lookaheadGate = gate;
-    if (lookaheadTimer) {
-      clearTimeout(lookaheadTimer);
-      lookaheadTimer = null;
+  function armPreloadTimer(delayMs) {
+    if (preloadTimer) return;
+    preloadTimer = window.setTimeout(() => {
+      preloadTimer = null;
+      runPreload();
+    }, typeof delayMs === "number" ? delayMs : PRELOAD.tickMs);
+  }
+
+  // After a nudge, watch the grid for growth inside the settle window. A slow
+  // server must not be mistaken for a dead end, so the verdict is never made
+  // before the first poll rounds pass.
+  function waitForPreloadGrowth() {
+    const before = feedItemCount();
+    let checked = 0;
+    const poll = () => {
+      checked += 1;
+      if (feedItemCount() > before) {
+        diag.preloadGrowth += 1;
+        diag.preloadDeadRounds = 0;
+        armPreloadTimer();
+        return;
+      }
+      if (checked * PRELOAD.settlePollMs >= PRELOAD.settleMs) {
+        diag.preloadDeadRounds += 1;
+        armPreloadTimer(
+          diag.preloadDeadRounds >= PRELOAD.maxDeadRounds ? PRELOAD.pauseAfterDeadMs : undefined
+        );
+        return;
+      }
+      window.setTimeout(poll, PRELOAD.settlePollMs);
+    };
+    window.setTimeout(poll, PRELOAD.settlePollMs);
+  }
+
+  function runPreload() {
+    if (diag.preloadActive === false) return;
+    if (!state.enabled || !state.settings.bgPreload) {
+      stopPreload(!state.enabled ? "master switch is OFF" : "background preload toggle is OFF");
+      return;
     }
-    if (lookaheadScrollHandler) {
-      window.removeEventListener("scroll", lookaheadScrollHandler);
-      lookaheadScrollHandler = null;
+    if (!homeActive || location.pathname !== "/" || isShortsPlayerPage()) {
+      stopPreload("not the home feed");
+      return;
+    }
+    // Enough content already buffered below the fold: wait instead of loading
+    // pages the user cannot reach yet.
+    if (preloadScreensPending() >= PRELOAD.targetScreens) {
+      armPreloadTimer(PRELOAD.tickMs * 3);
+      return;
+    }
+    diag.preloadRounds += 1;
+    if (nudgeNativeContinuation()) {
+      waitForPreloadGrowth();
+    } else {
+      // No sentinel on this build: YouTube's native pagination is unavailable,
+      // so there is nothing to wake and poking would just spin. Say so once.
+      diag.preloadDeadRounds = PRELOAD.maxDeadRounds;
+      stopPreload("no continuation sentinel on this build");
     }
   }
 
-  function resetFeedLookahead() {
-    stopFeedLookahead();
-    diag.lookaheadGate = "";
-    lookaheadRounds = 0;
-    lookaheadDeadRounds = 0;
-    lookaheadLastRun = 0;
-    lookaheadRunning = false;
+  function startPreload() {
+    if (!state.enabled) {
+      stopPreload("master switch is OFF");
+      return;
+    }
+    if (!state.settings.bgPreload) {
+      stopPreload("background preload toggle is OFF");
+      return;
+    }
+    if (!isFilterSurface() || isShortsPlayerPage() || location.pathname !== "/") {
+      stopPreload("not the home feed");
+      return;
+    }
+    if (!diag.preloadActive) {
+      diag.preloadActive = true;
+      diag.preloadGate = "";
+      armPreloadTimer();
+    }
   }
 
-  // Re-arm the loop. Every exit path from runLookahead goes through here, which
-  // is what makes the feature work in the background: previously the only way
-  // to get another round was a user scroll event, so a tab left alone could
-  // never make progress.
-  function armLookaheadTimer(delayMs) {
-    if (lookaheadTimer) return;
-    lookaheadTimer = window.setTimeout(() => {
-      lookaheadTimer = null;
-      runLookahead();
-    }, typeof delayMs === "number" ? delayMs : LOOKAHEAD.tickMs);
-  }
-
-  // --- Diagnostics ----------------------------------------------------------
-  // Why this exists: the two feed features could not be verified from the
-  // development browser, because YouTube never hydrates its rich grid there
-  // (grid.api absent, no browse request, a three-card stub). Every earlier
-  // conclusion about why they failed was therefore an inference, and the
-  // inferences were wrong twice.
-  //
-  // So the extension records what it actually sees on the page the user is
-  // really using, and the options page shows it. No console, no devtools, no
-  // asking the user to type anything: open Settings, read Diagnostics.
   const DIAG_KEY = "feedDiag";
   const DIAG_THROTTLE_MS = 1500;
 
   const diag = {
     updatedAt: 0,
     page: "",
-    cards: 0,
-    bufferScreens: 0,
-    sentinel: false,
-    sentinelInView: false,
-    gridPresent: false,
-    gridApiPresent: false,
-    methodsOnGrid: [],
-    methodsOnApi: [],
-    gridMembers: [],
-    apiMembers: [],
-    appMembers: [],
-    gridDataKeys: [],
-    gridItemsLength: null,
-    contentsChildren: null,
-    tailTags: [],
-    continuationishTags: [],
-    lookaheadOn: false,
-    ticks: 0,
-    rounds: 0,
-    requests: [],
-    growthSeen: 0,
-    deadRounds: 0,
-    stopped: false,
-    endlessOn: false,
-    exhausted: false,
-    reloadButton: "",
-    reloadCandidates: [],
-    presses: 0,
-    pressesThatGrew: 0,
-    gaveUp: false,
-    refillAdded: 0,
-    refillBatches: 0,
-    refillRunning: false,
-    refillError: "",
-    // True while a continuation token from the previous refill is saved. A
-    // saved token means the next refill walks deeper into the chain instead
-    // of replaying the top of the feed (the "loaded once, then stopped"
-    // symptom when this is unreachable).
-    refillTokenChain: false,
-    // Why smooth scroll is not running, when it is not: the exact gate that
-    // held it back, shown verbatim in Diagnostics so a "dead" feature is
-    // explained instead of guessed at.
-    lookaheadGate: "",
-    lookaheadSetting: true,
-    endlessSetting: true,
-    enabledSetting: true,
-    // The endless path skipped the (dead) reload button and went straight to
-    // refilling, and whether a refill dropped its stale continuation token.
-    refillDirect: false,
-    refillChainReset: false,
-    // True while the recommendation pool is exhausted and refills are backing
-    // off until YouTube rotates it.
-    refillPoolExhausted: false,
-    // True while a quiet rotation probe is scheduled: the pool ran dry and the
-    // extension will re-browse on its own after ~45s (no reload, no user
-    // action), so genuinely new recommendations keep the feed growing.
-    refillProbeArmed: false,
+    // How many cards the filter processed and how many it hid, so the filter
+    // stays observable in Diagnostics.
+    checked: 0,
+    hidden: 0,
+    // Background feed preload (native, no fabricated cards).
+    preloadActive: false,
+    preloadSetting: true,
+    preloadHook: "",
+    preloadRounds: 0,
+    preloadGrowth: 0,
+    preloadDeadRounds: 0,
+    preloadGate: "",
+    // Subscription-sync observability (written by the sync code).
     syncChannels: 0,
     syncPartial: false,
     syncSkippedPages: 0
@@ -1191,164 +1205,6 @@
   let diagDirty = false;
   let diagLastWrite = 0;
 
-  function note(method, extra) {
-    if (diag.requests.length < 40) diag.requests.push(method + (extra ? ":" + extra : ""));
-    diagDirty = true;
-  }
-
-  // Which continuation entry points actually exist on this build of YouTube.
-  // The method names move between releases, so this is recorded rather than
-  // assumed, and the recorded list is what a diagnosis should be based on.
-  const CONTINUATION_CANDIDATES = [
-    "reloadContinuationItems",
-    "handleAppendContinuationItemsAction",
-    "handleReloadContinuationItemsCommand",
-    "onReloadContinuationFinish"
-  ];
-
-  // Collects every member of an object across its prototype chain. The whole
-  // point is to stop guessing names: the previous four candidates were invented,
-  // and the Diagnostics report came back with "none of those exist".
-  function allMembersOf(holder) {
-    if (!holder || typeof holder !== "object") return [];
-    const names = new Set();
-    let cursor = holder;
-    let depth = 0;
-    while (cursor && depth < 10) {
-      let current = cursor;
-      let inner = 0;
-      while (current && inner < 10) {
-        for (const key of Object.getOwnPropertyNames(current)) {
-          if (key === "constructor") continue;
-          names.add(key);
-        }
-        current = Object.getPrototypeOf(current);
-        inner += 1;
-      }
-      cursor = Object.getPrototypeOf(cursor);
-      depth += 1;
-    }
-    return Array.from(names);
-  }
-
-  const RELEVANT_MEMBER = /continu|reload|append|insert|refresh|more|load|item|purge|clear/i;
-
-  function probeContinuationApi() {
-    const grid = document.querySelector("ytd-rich-grid-renderer");
-    const app = document.querySelector("ytd-app");
-    const api = (grid && grid.api) || null;
-    diag.gridPresent = Boolean(grid);
-    diag.gridApiPresent = Boolean(api);
-    diag.methodsOnGrid = grid ? CONTINUATION_CANDIDATES.filter((n) => typeof grid[n] === "function") : [];
-    diag.methodsOnApi = api ? CONTINUATION_CANDIDATES.filter((n) => typeof api[n] === "function") : [];
-
-    // Everything that even looks like a continuation entry point, not just the
-    // four names this file happened to guess.
-    diag.gridMembers = grid
-      ? allMembersOf(grid).filter((n) => RELEVANT_MEMBER.test(n) && typeof grid[n] === "function").slice(0, 60)
-      : [];
-    diag.apiMembers = api
-      ? allMembersOf(api).filter((n) => typeof api[n] === "function").slice(0, 60)
-      : [];
-    diag.appMembers = app
-      ? allMembersOf(app).filter((n) => /navigat|reload|refresh|pager|store|data/i.test(n) && typeof app[n] === "function").slice(0, 40)
-      : [];
-
-    // The grid's own data model, which is how items actually get added.
-    diag.gridDataKeys = [];
-    for (const key of ["data", "__data", "__dataProxy"]) {
-      const holder = grid && grid[key];
-      if (holder && typeof holder === "object") {
-        diag.gridDataKeys.push(key + ": " + Object.keys(holder).slice(0, 14).join(","));
-      }
-    }
-    const items = grid && grid.data && Array.isArray(grid.data.items) ? grid.data.items : null;
-    diag.gridItemsLength = items ? items.length : null;
-
-    return { grid, api };
-  }
-
-  // What is actually at the end of the grid when the feed is finished. If
-  // YouTube renders no control there, no amount of button matching will find
-  // one, and the report should say so instead of guessing.
-  function probeFeedTail() {
-    const grid = document.querySelector("ytd-rich-grid-renderer");
-    const contents = grid && grid.querySelector("#contents");
-    diag.tailTags = [];
-    if (!contents) return;
-    const kids = Array.from(contents.children);
-    for (const kid of kids.slice(-4)) {
-      diag.tailTags.push(kid.tagName.toLowerCase() + (kid.id ? "#" + kid.id : ""));
-    }
-    diag.contentsChildren = contents.children.length;
-    // Any element anywhere whose tag or id hints at a continuation or reload.
-    diag.continuationishTags = [];
-    const all = contents.querySelectorAll("*");
-    for (let i = 0; i < all.length && diag.continuationishTags.length < 12; i++) {
-      const el = all[i];
-      const tag = el.tagName.toLowerCase();
-      if (/continu|reload|sentinel|spinner/.test(tag + " " + (el.id || ""))) {
-        diag.continuationishTags.push(tag + (el.id ? "#" + el.id : ""));
-      }
-    }
-  }
-
-  function snapshotPage() {
-    diag.page = location.pathname;
-    diag.cards = countFeedItems();
-    diag.bufferScreens = Number(feedBufferScreens().toFixed(2));
-    const sentinel = findFeedContinuation();
-    diag.sentinel = Boolean(sentinel);
-    diag.sentinelInView = Boolean(
-      sentinel && sentinel.getBoundingClientRect &&
-      sentinel.getBoundingClientRect().top < window.innerHeight &&
-      sentinel.getBoundingClientRect().bottom > 0
-    );
-    probeContinuationApi();
-    probeFeedTail();
-    // The card the refill would clone, described live: its element shapes, the
-    // element the byline selector hits, and the captured channel. Rendered in
-    // every report regardless of whether a refill ran, so a byline rewrite
-    // miss can be pinned to the actual layout on the page.
-    diag.templateCardProbe = (() => {
-      const grid = document.querySelector("ytd-rich-grid-renderer #contents, #contents");
-      if (!grid) return null;
-      const card = Array.from(grid.querySelectorAll("ytd-rich-item-renderer"))
-        .find((c) => {
-          const href = firstVideoHref(c);
-          return Boolean(href) && href.includes("/watch?v=");
-        });
-      if (!card) return { card: "none" };
-      const cls = typeof card.className === "string" && card.className
-        ? "." + String(card.className).trim().split(/\s+/).slice(0, 2).join(".")
-        : "";
-      const bylineEl = card.querySelector(BYLINE_SELECTOR);
-      return {
-        card: card.tagName.toLowerCase() + cls,
-        channel: captureTemplateChannel(card),
-        byline: bylineEl
-          ? bylineEl.tagName.toLowerCase() +
-            (typeof bylineEl.className === "string" && bylineEl.className
-              ? "." + String(bylineEl.className).trim().split(/\s+/)[0] : "") +
-            ': "' + String(bylineEl.textContent || "").trim().slice(0, 24) + '"'
-          : "none",
-        dom: cardDomSummary(card)
-      };
-    })();
-    const button = findFeedReloadButton();
-    diag.reloadButton = button
-      ? String(button.getAttribute("aria-label") || button.innerText || "").replace(/\s+/g, " ").trim().slice(0, 40)
-      : "";
-    diag.reloadCandidates = (found.candidates || []).slice(0, 12);
-    diag.refillTokenChain = Boolean(refillState.nextToken);
-    // The settings that gate the feed features, so Diagnostics explains why a
-    // feature is off instead of leaving "0 ticks" to be guessed at.
-    diag.lookaheadSetting = Boolean(state.settings.feedLookahead);
-    diag.endlessSetting = Boolean(state.settings.endlessFeed);
-    diag.enabledSetting = Boolean(state.enabled);
-    diag.refillPoolExhausted = Boolean(refillState.poolExhaustedAt);
-    diagDirty = true;
-  }
 
   function flushDiag(force) {
     if (!diagDirty && !force) return;
@@ -1358,1622 +1214,6 @@
     diagDirty = false;
     diag.updatedAt = now;
     browser.storage.local.set({ [DIAG_KEY]: { ...diag } }).catch(() => {});
-  }
-
-  function schedulePrefetch() {
-    if (!state.enabled || !state.settings.feedLookahead || !LOOKAHEAD.enabled) {
-      stopFeedLookahead(
-        !state.enabled
-          ? "master switch is OFF"
-          : !state.settings.feedLookahead
-            ? "Smooth scroll toggle is OFF"
-            : "lookahead disabled"
-      );
-      return;
-    }
-    if (!isFilterSurface() || isShortsPlayerPage() || location.pathname !== "/") {
-      stopFeedLookahead(
-        !isFilterSurface()
-          ? "not a feed surface"
-          : isShortsPlayerPage()
-            ? "shorts player page"
-            : "not the home page"
-      );
-      return;
-    }
-    if (!lookaheadActive) {
-      lookaheadActive = true;
-      diag.lookaheadGate = "";
-      lookaheadScrollHandler = () => runLookahead();
-      window.addEventListener("scroll", lookaheadScrollHandler, { passive: true });
-    }
-    armLookaheadTimer();
-    runLookahead();
-  }
-
-  // Ask YouTube for the next page. Returns the strategy that fired, or null.
-  //
-  // A regression worth recording: this used to fall back to
-  // sentinel.scrollIntoView(), which is what actually makes YouTube fetch. That
-  // was removed because it moves the user's viewport, and what replaced it only
-  // *checked* whether the sentinel was on screen and then did nothing. So the
-  // fallback reported success, waited, saw no growth, and after six rounds shut
-  // the feature off. Both feed features were dead because of that, not because
-  // of anything YouTube did.
-  //
-  // Strategy order:
-  //   1. A no-argument continuation method on the grid or on its api object.
-  //      Only called when fn.length === 0, because the handlers that take a
-  //      parsed response cannot be fed a guessed argument.
-  //   2. Nudge the sentinel into the viewport with a transform.
-  //
-  // On the transform: YouTube loads the next page from an IntersectionObserver
-  // on the continuation element, and that observer fires on the element's
-  // geometry crossing the viewport -- not on the scroll position itself. A
-  // transform moves the element without touching layout, scrollTop or
-  // scrollHeight, so the observer fires and the page does not move. The style is
-  // restored right after. scrollIntoView is not used at all: it moves the user.
-  function requestMoreFromYouTube() {
-    const { grid, api } = probeContinuationApi();
-
-    for (const holder of [api, grid]) {
-      if (!holder) continue;
-      for (const name of CONTINUATION_CANDIDATES) {
-        if (typeof holder[name] !== "function") continue;
-        // Only safe to call with no arguments.
-        if (holder[name].length !== 0) continue;
-        try {
-          holder[name]();
-          note("call:" + name);
-          return "call:" + name;
-        } catch (error) {
-          note("call-failed:" + name);
-        }
-      }
-    }
-
-    const sentinel = findFeedContinuation();
-    if (!sentinel) return null;
-
-    // Two nudges, because neither alone is reliable across YouTube builds.
-    //
-    // The transform pulls the sentinel into the viewport without touching
-    // layout, scrollTop or scrollHeight, which is enough when the load is driven
-    // by an IntersectionObserver. It is not enough if YouTube also gates on the
-    // real scroll position, which some builds do.
-    //
-    // So a one-pixel scroll happens as well: enough to fire scroll listeners and
-    // to re-evaluate the observer, and restored on the next frame so the page
-    // never visibly moves. scrollIntoView is still not used -- it moves the
-    // user to the bottom of the feed, which is the behaviour that got this
-    // feature rejected.
-    const previous = sentinel.style.transform;
-    try {
-      sentinel.style.transform = "translateY(-100vh)";
-    } catch (error) {
-      note("nudge-transform-failed");
-      return null;
-    }
-
-    const doc = document.scrollingElement || document.documentElement;
-    let restored = false;
-    try {
-      if (doc) {
-        const at = doc.scrollTop;
-        doc.scrollTop = at + 1;
-        window.requestAnimationFrame(() => {
-          if (restored) return;
-          restored = true;
-          doc.scrollTop = at;
-        });
-      }
-    } catch (error) {
-      note("nudge-scroll-failed");
-    }
-
-    note("nudge");
-    window.setTimeout(() => {
-      if (sentinel.isConnected) sentinel.style.transform = previous;
-    }, 900);
-    return "nudge";
-  }
-
-  function runLookahead() {
-    if (!lookaheadActive || lookaheadRunning) return;
-
-    diag.lookaheadOn = true;
-    diag.ticks += 1;
-    snapshotPage();
-
-    // Stop the runaway guardrail, but never switch the feature off for the rest
-    // of the visit.
-    //
-    // Measured on a real page: the nudge grew the feed 11 times, then one round
-    // missed its settle window, the dead counter reached 6 and the feature shut
-    // itself down permanently. That is the same "worked, then went silent"
-    // failure as before, only later. A flaky trigger on a busy page is normal;
-    // it is not a reason to give up for good.
-    if (lookaheadDeadRounds >= LOOKAHEAD.maxDeadRounds) {
-      // Back off hard, drop the counter, and try again. The user is never told
-      // and the page is never touched.
-      lookaheadDeadRounds = 0;
-      lookaheadLastRun = Date.now();
-      diag.stopped = false;
-      armLookaheadTimer(LOOKAHEAD.pauseAfterDeadMs);
-      return;
-    }
-
-    // Work only when the buffer below the fold is genuinely thin. This is the
-    // check the old version had inverted: it demanded the user already be near
-    // the bottom, which is the single moment lookahead can do nothing for them.
-    if (feedBufferScreens() >= LOOKAHEAD.targetScreens) {
-      lookaheadDeadRounds = 0;
-      armLookaheadTimer();
-      return;
-    }
-
-    // YouTube is already fetching. Never stack a second request on top.
-    if (feedIsLoading()) {
-      armLookaheadTimer();
-      return;
-    }
-
-    // Minimum gap between requests, so this still cannot free-run.
-    if (Date.now() - lookaheadLastRun < LOOKAHEAD.tickMs) {
-      armLookaheadTimer();
-      return;
-    }
-
-    if (!requestMoreFromYouTube()) {
-      // Nothing to trigger: no continuation element and no callable method.
-      // On a page where the feed is server-rendered and Polymer never hydrates
-      // the grid, there is nothing YouTube itself can do to append more cards.
-      // The refill is the only mechanism that grows the feed, so hand the work
-      // to it instead of banking a dead round that can never succeed.
-      //
-      // fromLookahead relaxes the buffer threshold (targetScreens rather than
-      // the exhausted-only threshold) and skips the endless-toggle gate, so
-      // smooth scroll really does keep the buffer full while the user reads.
-      if (!refillState.running) {
-        note("refill:lookahead");
-        refillHomeFeed({ fromLookahead: true });
-      }
-      lookaheadDeadRounds += 1;
-      armLookaheadTimer();
-      flushDiag();
-      return;
-    }
-
-    lookaheadRunning = true;
-    lookaheadLastRun = Date.now();
-    lookaheadRounds += 1;
-    diag.rounds = lookaheadRounds;
-    diag.deadRounds = lookaheadDeadRounds;
-    flushDiag();
-    waitForFeedGrowth(countFeedItems());
-  }
-
-  // Polls until YouTube appends something or the settle window expires. One
-  // check cannot distinguish a slow server from a real dead end, so this waits
-  // and only then decides.
-  function waitForFeedGrowth(before) {
-    const deadline = Date.now() + LOOKAHEAD.settleMs;
-    const poll = () => {
-      // This timeout has fired; clear the slot so armLookaheadTimer can re-arm.
-      lookaheadTimer = null;
-      if (countFeedItems() > before) {
-        // Real progress. Clear the dead counter so one bad round can never end
-        // the feature for the whole page load.
-        lookaheadDeadRounds = 0;
-        lookaheadRunning = false;
-        diag.growthSeen += 1;
-        diag.deadRounds = 0;
-        armLookaheadTimer();
-        flushDiag();
-        return;
-      }
-      if (Date.now() >= deadline) {
-        // Only count it as dead when YouTube is neither loading nor offering a
-        // continuation. Busy-but-slow must not be mistaken for finished.
-        if (!feedIsLoading() && !findFeedContinuation()) {
-          lookaheadDeadRounds += 1;
-        }
-        lookaheadRunning = false;
-        diag.deadRounds = lookaheadDeadRounds;
-        armLookaheadTimer();
-        flushDiag();
-        return;
-      }
-      lookaheadTimer = window.setTimeout(poll, LOOKAHEAD.settlePollMs);
-    };
-    lookaheadTimer = window.setTimeout(poll, LOOKAHEAD.settlePollMs);
-  }
-
-  // --- Feed refill -----------------------------------------------------------
-  // Why this exists, and why it looks the way it does.
-  //
-  // Measured on the user's real Firefox: the home feed loads 679 cards, then
-  // YouTube consumes every continuation token and removes the sentinel. Nothing
-  // is rendered at the end of the feed -- the report shows
-  // "continuation-ish: none" and four plain ytd-rich-item-renderer as the last
-  // children. grid.data does not exist and the grid exposes no continuation
-  // methods, so there is no model to push items into.
-  //
-  // Two earlier conclusions were wrong and are retracted here:
-  //
-  //   * "YouTube renders a Show more button at the end of the feed." It does
-  //     not, on this build. Every "more" button on the page belongs to a shelf
-  //     or a chip row, which is why pressing one did nothing.
-  //   * "Hand-built cards are re-rendered by Polymer's own template and come out
-  //     blank." That was measured in a browser where Polymer never hydrated, so
-  //     the conclusion was drawn from a page that was not rendering anything.
-  //     The same report that disproved it also shows grid.data missing and no
-  //     grid methods: the feed is server-rendered HTML, Polymer is not
-  //     hydrating it, and therefore it cannot re-render anything we insert.
-  //
-  // So cards are built by CLONING a real card that is already on the page and
-  // rewriting its link and thumbnail. That guarantees identical structure, class
-  // names and styling to the surrounding feed, without guessing at markup and
-  // without depending on a data model that is not there.
-  const REFILL = {
-    // How many fresh batches to request per refill. 3 batches could only
-    // trickle a few cards per scroll, because the FIRST page of the pool is
-    // almost entirely "already seen" once refillSeen is warm; the deeper
-    // pages of a live chain hold the genuinely new recommendations, so a
-    // refill walks up to this many pages instead of stopping at the first
-    // all-seen one.
-    maxBatches: 12,
-    // How many batches a quiet rotation probe walks. When the pool just ran
-    // dry, a full 12-page walk every probe would hammer InnerTube for a
-    // mostly-seen pool; 2 pages are enough to notice new uploads.
-    probeBatches: 2,
-    // A run must add at least this many cards for the pool to count as alive.
-    // Below it the refill backs off (see poolExhaustedAt) instead of hammering
-    // the same half-drained well on every scroll -- the "every scroll waits
-    // seconds for two cards" behaviour the user reported.
-    minYieldToStayOpen: 6,
-    // After a refill that added nothing, wait this long before trying again.
-    // The feed may simply be over; hammering InnerTube helps no one.
-    emptyCooldownMs: 15000,
-    // The recommendation pool is finite per browse, but it is NOT dead: new
-    // uploads and YouTube's own rotation refill it constantly. When a refill
-    // finds nothing, the extension quietly probes again after this window
-    // instead of stopping and telling the user to reload the page. No reload:
-    // the probe re-browses with the same credentials and the page's own
-    // dedupe, so genuinely new cards keep appearing on their own forever.
-    poolRetryMs: 45000,
-    // One load event gathers everything it can within this window and then
-    // delivers it as a SINGLE dense wall of cards. The user asked for "много
-    // сразу, за раз, за пару секунд максимум" -- not a trickle stretched over
-    // 10+ seconds every scroll. The saved continuation token continues the
-    // same chain on the next scroll, so nothing is lost -- each event is just
-    // fast, and the whole pool still gets covered across a few scrolls.
-    burstWindowMs: 3000,
-    requestTimeoutMs: 12000,
-    settleQuietMs: 3000
-  };
-
-  // Videos ever handed out by a refill, kept across page loads so a fresh
-  // session does not re-append the same recommendations again (the 1.24.0
-  // complaint: the second attempt added ~the same videos as the first).
-  const REFILL_SEEN_KEY = "refillSeenVideos";
-  const REFILL_SEEN_CAP = 3000;
-  let refillSeen = new Set();
-  let refillSeenSaveTimer = null;
-
-  // The InnerTube credentials live on the page's own ytcfg. Reading them from
-  // the DOM source is the fallback for the rare case where ytcfg is not
-  // reachable from the content script.
-  let innertubeConfig = null;
-
-  async function innertubeConfigFor() {
-    if (innertubeConfig) return innertubeConfig;
-    let apiKey = "";
-    let clientVersion = "";
-    let visitorData = "";
-    try {
-      if (window.ytcfg && typeof window.ytcfg.get === "function") {
-        apiKey = window.ytcfg.get("INNERTUBE_API_KEY") || "";
-        clientVersion = window.ytcfg.get("INNERTUBE_CLIENT_VERSION") || "";
-        visitorData = window.ytcfg.get("VISITOR_DATA") || "";
-      }
-    } catch (error) {
-      // ytcfg belongs to the page; fall through to the DOM source below.
-    }
-    if ((!apiKey || !clientVersion) && document.documentElement) {
-      const source = document.documentElement.outerHTML || "";
-      const keyMatch = source.match(/"INNERTUBE_API_KEY":\s*"([^"]+)"/);
-      const versionMatch = source.match(/"INNERTUBE_CLIENT_VERSION":\s*"([^"]+)"/);
-      const visitorMatch = source.match(/"VISITOR_DATA":\s*"([^"]+)"/);
-      if (keyMatch) apiKey = keyMatch[1];
-      if (versionMatch) clientVersion = versionMatch[1];
-      if (!visitorData && visitorMatch) visitorData = visitorMatch[1];
-    }
-    if (!apiKey || !clientVersion) return null;
-    innertubeConfig = { apiKey, clientVersion, visitorData };
-    return innertubeConfig;
-  }
-
-  const refillState = {
-    videoIds: new Set(),
-    templateCard: null,
-    // The template's own channel name, captured from whichever element renders
-    // it. Refilled cards are rewritten BY CONTENT (find the captured text,
-    // replace it) rather than by a guessed selector, because every layout
-    // YouTube ships puts the channel somewhere slightly different and a
-    // selector miss was the 1.24-1.26 "one channel under all cards" bug.
-    templateChannel: "",
-    running: false,
-    added: 0,
-    batches: 0,
-    error: "",
-    // The continuation token of the LAST batch we consumed. Remembering it is
-    // what lets a refill keep going on the next exhaustion instead of replaying
-    // the same first page: without it, every refill asked for FEwhat_to_watch
-    // from scratch, YouTube returned the same top videos, and they were all
-    // already in videoIds, so nothing was ever added twice.
-    nextToken: "",
-    // How long to wait after a refill that added nothing before trying again.
-    // Prevents hammering InnerTube when the feed is genuinely at its end.
-    lastEmptyAt: 0,
-    // When the recommendation pool ran out (a refill added nothing AND the
-    // chain ended). A fresh browse returns the same pool for a while, so
-    // refills are gated until YouTube rotates it.
-    poolExhaustedAt: 0,
-    // When the last refill actually started, so repeated lookahead ticks cannot
-    // fire a new InnerTube chain every 900ms.
-    lastRunAt: 0
-  };
-
-  // What the last InnerTube responses actually contained, so a refill that adds
-  // nothing reports why instead of failing quietly.
-  const refillProbe = {
-    idKinds: { videoId: 0, video_id: 0, contentId: 0 },
-    responseStatus: 0,
-    responseKeys: [],
-    firstContentTag: "",
-    // Where the extracted ids were found: the rich grid, continuation actions,
-    // or an "other" subtree (shelves/entities that escaped the skip list). A
-    // refill that produces mostly music shows up here as non-grid sources,
-    // which is exactly the 1.25.0 report ("опять музыка, не похоже на выдачу").
-    sources: { root: 0, grid: 0, actions: 0 },
-    nonFeedSkipped: 0,
-    // The JSON path and own keys of the FIRST extracted video, plus a flat
-    // inventory of every key in the response. Together they name the exact
-    // container a shape change hides videos in, so a "0 videos" or "mostly
-    // music" report is diagnosable instead of guesswork.
-    firstVideoPath: "",
-    videoShape: [],
-    keyInventory: [],
-    // The template card's captured channel and its full element-shape list, so
-    // the report shows exactly what the refill clones and rewrites.
-    templateChannel: "",
-    templateDom: [],
-    templateCard: "",
-    templateByline: "",
-    pageHasWatchAnchors: false,
-    matchedTemplate: false
-  };
-
-  // Video ids already in the grid, so a refill never repeats what the user has
-  // already scrolled past. The cross-session seen list is merged in too, so a
-  // fresh page load does not re-append the same recommendations the previous
-  // session already handed out.
-  function seedRefillVideoIds() {
-    refillState.videoIds = new Set();
-    refillSeen.forEach((id) => refillState.videoIds.add(id));
-    document.querySelectorAll(CARD_SELECTOR).forEach((card) => {
-      const href = firstVideoHref(card);
-      if (!href) return;
-      const match = href.match(/[?&]v=([\w-]{6,})/);
-      if (match) refillState.videoIds.add(match[1]);
-    });
-    return refillState.videoIds.size;
-  }
-
-  // Records a handed-out video in the cross-session seen list. The save is
-  // debounced so a refill that appends a few batches does not write storage on
-  // every card.
-  function rememberRefillSeen(id) {
-    if (!id || refillSeen.has(id)) return;
-    refillSeen.add(id);
-    if (refillSeenSaveTimer) return;
-    refillSeenSaveTimer = window.setTimeout(() => {
-      refillSeenSaveTimer = null;
-      if (refillSeen.size <= REFILL_SEEN_CAP) {
-        browser.storage.local.set({ [REFILL_SEEN_KEY]: Array.from(refillSeen) }).catch(() => {});
-        return;
-      }
-      // Trim to the newest ids, then persist.
-      const list = Array.from(refillSeen).slice(-REFILL_SEEN_CAP);
-      refillSeen = new Set(list);
-      browser.storage.local.set({ [REFILL_SEEN_KEY]: list }).catch(() => {});
-    }, 2000);
-  }
-
-  // Where the channel name lives on a card, across the layouts YouTube has
-  // shipped. #byline is the legacy spot; ytd-channel-name is used on channel
-  // and watch pages; the modern home lockup renders the channel as the FIRST
-  // text span of the metadata line (the later spans are views/date — which is
-  // why only the first match is rewritten). A refilled card that cannot find
-  // one of these keeps the template's channel, which is the 1.24.0 regression
-  // the user saw as "Gamers Nexus under every card".
-  const BYLINE_SELECTOR = [
-    "#byline",
-    "ytd-channel-name yt-formatted-string",
-    "ytd-channel-name #text",
-    "#channel-name yt-formatted-string",
-    "#channel-name #text",
-    ".yt-content-metadata-view-model__metadata-text",
-    "#channel-name"
-  ].join(", ");
-
-  // The unique element shapes inside a card, in document order. Diagnostics
-  // renders this so the actual layout of the cloned card is visible: if the
-  // channel rewrite misses, the element that holds the channel name shows up
-  // here and the selector can be made to match it.
-  function cardDomSummary(card, cap) {
-    const seen = new Set();
-    const out = [];
-    const queue = [card];
-    let guard = 0;
-    while (queue.length && guard < 3000 && out.length < (cap || 50)) {
-      guard += 1;
-      const el = queue.shift();
-      if (!el || !el.tagName) continue;
-      const cls = typeof el.className === "string" && el.className
-        ? "." + String(el.className).trim().split(/\s+/).slice(0, 2).join(".")
-        : "";
-      const token = el.tagName.toLowerCase() + (el.id ? "#" + el.id : "") + cls;
-      if (!seen.has(token)) {
-        seen.add(token);
-        out.push(token);
-      }
-      if (el.children) {
-        for (const child of el.children) queue.push(child);
-      }
-    }
-    return out;
-  }
-
-  // The channel name as the template card actually renders it, in any layout:
-  // try the known byline spots first, then any element whose href points at a
-  // channel page, then the handle (@name) of the first text-bearing leaf. A
-  // leaf whose text is a duration or a views/date string is never a channel.
-  function captureTemplateChannel(template) {
-    if (!template || typeof template.querySelector !== "function") return "";
-    const candidates = [
-      template.querySelector(BYLINE_SELECTOR),
-      template.querySelector("a[href^='/@']"),
-      template.querySelector("a[href*='/@']"),
-      template.querySelector(".yt-lockup-metadata-view-model__metadata-link"),
-      template.querySelector("ytd-channel-name")
-    ];
-    for (const el of candidates) {
-      if (!el || !el.textContent) continue;
-      const text = String(el.textContent).replace(/\s+/g, " ").trim();
-      if (!text) continue;
-      if (/^\d{1,2}:\d{2}$/.test(text)) continue;
-      if (/просмотр|year|ago\b|subscriber|подписчик/i.test(text)) continue;
-      // Some layouts merge "channel · views · date" into one string; the
-      // channel is the part before the first separator.
-      const first = text.split(/\s*[·•|]\s*/)[0].trim();
-      if (first) return first;
-    }
-    const all = template.querySelectorAll("a, span, yt-formatted-string, div");
-    for (const el of all || []) {
-      if (!el || (el.children && el.children.length > 0)) continue;
-      const text = String(el.textContent || "").trim();
-      if (text.includes("@")) return text;
-    }
-    return "";
-  }
-
-  // Rewrites the channel on a CLONED card by content: find the leaves whose text
-  // starts with the template's captured channel (exact, or merged with the
-  // " · views · date" tail) and replace the channel part only (up to 3 leaves,
-  // in case the name is duplicated). Any layout is handled, because the text
-  // itself is the locator -- no selector to guess.
-  function rewriteChannelByContent(card, templateChannel, bylineText) {
-    if (!templateChannel) return 0;
-    let hits = 0;
-    const nodes = card.querySelectorAll("*");
-    for (const el of nodes) {
-      if (hits >= 3) break;
-      if (el.children && el.children.length > 0) continue;
-      const text = String(el.textContent || "").trim();
-      if (!text || text.indexOf(templateChannel) !== 0) continue;
-      const rest = text.slice(templateChannel.length);
-      el.textContent = (bylineText || "") + rest;
-      hits += 1;
-    }
-    return hits;
-  }
-
-  // A real card to copy the shape of. Prefer a plain video card over a shelf or
-  // a Shorts lockup, since those have very different internal structure.
-  function findRefillTemplate() {
-    if (refillState.templateCard && refillState.templateCard.isConnected) {
-      refillProbe.matchedTemplate = true;
-      return refillState.templateCard;
-    }
-    const grid = document.querySelector("ytd-rich-grid-renderer #contents, #contents");
-    if (!grid) return null;
-    const candidates = Array.from(grid.querySelectorAll("ytd-rich-item-renderer"))
-      .filter((card) => {
-        const href = firstVideoHref(card);
-        return Boolean(href) && href.includes("/watch?v=");
-      });
-    refillProbe.matchedTemplate = candidates.length > 0;
-    refillState.templateCard = candidates[0] || null;
-    const template = refillState.templateCard;
-    if (template) {
-      // Record what kind of card was cloned and which element the byline
-      // rewrite will hit, so Diagnostics can say why a rewrite missed.
-      const cls = typeof template.className === "string" && template.className
-        ? "." + String(template.className).trim().split(/\s+/).slice(0, 2).join(".")
-        : "";
-      refillProbe.templateCard = template.tagName.toLowerCase() + cls;
-      const bylineEl = template.querySelector(BYLINE_SELECTOR);
-      refillProbe.templateByline = bylineEl
-        ? bylineEl.tagName.toLowerCase() +
-          (typeof bylineEl.className === "string" && bylineEl.className
-            ? "." + String(bylineEl.className).trim().split(/\s+/)[0] : "") +
-          ': "' + String(bylineEl.textContent || "").trim().slice(0, 24) + '"'
-        : "none";
-      // The channel text the refill will rewrite by content, and the full set
-      // of element shapes in the card, so a miss is diagnosable from the
-      // report instead of requiring another test round.
-      refillState.templateChannel = captureTemplateChannel(template);
-      refillProbe.templateChannel = refillState.templateChannel;
-      refillProbe.templateDom = cardDomSummary(template);
-    }
-    return refillState.templateCard;
-  }
-
-  // Subtrees that are NOT the home feed. Music mixes, Shorts, shelves and
-  // playlists are either irrelevant to the main grid or already rendered by
-  // YouTube elsewhere on the page, and refilling them made the reports
-  // "подавляющая часть - музыка" (mostly music, nothing like the home feed).
-  // frameworkUpdates is the Polymer entity store: on a browse response it
-  // carries hundreds of lockupViewModels that are NOT grid rows, and they
-  // skewed both the extractions and the diagnostics. Topbar/header/sidebar are
-  // page furniture. Skipping all of them keeps the refill inside the rich
-  // grid, so the added cards match the feed the user is actually reading.
-  const NON_FEED_KEYS = new Set([
-    "richShelfRenderer", "shelfRenderer", "videoShelfRenderer", "musicShelfRenderer",
-    "reelShelfRenderer", "horizontalCardListRenderer", "expandedShelfContentsRenderer",
-    "merchandiseShelfRenderer", "heroShelfRenderer", "shortsLockupViewModel",
-    "musicResponsiveListItemRenderer", "musicTwoRowItemRenderer",
-    "playlistVideoListRenderer", "compactRadioRenderer", "radioRenderer",
-    "frameworkUpdates", "topbar", "header", "sidebar", "engagementPanel", "playerOverlay"
-  ]);
-
-  // A flat inventory of every key in a response, with occurrence counts. The
-  // Diagnostics render it so a response that yields 0 videos (or suspicious
-  // ones) can be diagnosed by its SHAPE instead of guessed at: if the music
-  // rows live under keys we do not recognise, their names show up here with
-  // their counts, and the right skip/parse follows.
-  function keyInventory(data, cap) {
-    const counts = new Map();
-    const queue = [data];
-    let guard = 0;
-    while (queue.length && guard < 500000) {
-      guard += 1;
-      const node = queue.shift();
-      if (!node || typeof node !== "object") continue;
-      for (const [key, value] of Object.entries(node)) {
-        counts.set(key, (counts.get(key) || 0) + 1);
-        if (value && typeof value === "object") queue.push(value);
-      }
-    }
-    return Array.from(counts.entries())
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, cap || 60)
-      .map(([key, count]) => key + " x" + count);
-  }
-
-  // Pulls every video out of one browse/continuation response.
-  //
-  // YouTube has shipped several id shapes for the same thing, and the page that
-  // reports "no videos" is usually the one where the shape changed again. The
-  // RSSHub 503 report ("LockupView format") is the same failure from a different
-  // angle: items started carrying video_id / content_id instead of videoId. So
-  // all three shapes are accepted, and the diagnostics record which ones were
-  // actually present so a miss is visible instead of silent.
-  function extractVideos(data) {
-    const out = [];
-    const seen = new Set();
-    const counts = refillProbe.idKinds;
-    const sources = refillProbe.sources;
-    // Each queued entry remembers which subtree it came from (so Diagnostics
-    // can tell grid rows from continuation actions from unexplained "other"
-    // nodes) and the JSON path of the first found video, which names the exact
-    // container when a shape changes under us.
-    const queue = [[data, "root", ""]];
-    let guard = 0;
-    while (queue.length && guard < 200000) {
-      guard += 1;
-      const pair = queue.shift();
-      const node = pair[0];
-      if (!node || typeof node !== "object") continue;
-      const src = pair[1];
-      const path = pair[2];
-      const flat = node.videoId || node.video_id || "";
-      let id = typeof flat === "string" ? flat : "";
-      if (typeof node.videoId === "string") counts.videoId += 1;
-      if (typeof node.video_id === "string") counts.video_id += 1;
-      if (node.contentId) {
-        if (typeof node.contentId === "string") {
-          counts.contentId += 1;
-          if (!id) id = node.contentId;
-        } else if (typeof node.contentId.videoId === "string") {
-          counts.contentId += 1;
-          if (!id) id = node.contentId.videoId;
-        }
-      }
-      if (id && /^[A-Za-z0-9_-]{11}$/.test(id) && !seen.has(id)) {
-        if (!refillProbe.firstVideoPath) {
-          refillProbe.firstVideoPath = path;
-          refillProbe.videoShape = Object.keys(node).slice(0, 16).join(", ");
-        }
-        seen.add(id);
-        sources[src] = (sources[src] || 0) + 1;
-        out.push({
-          id,
-          title: runsText(node.title) ||
-            runsText(node.headline) ||
-            runsText(node.metadata),
-          byline: lockupByline(node) ||
-            runsText(node.ownerText) ||
-            runsText(node.shortBylineText) ||
-            runsText(node.longBylineText) ||
-            runsText(node.videoOwnerRenderer && node.videoOwnerRenderer.title),
-          channelId: (node.ownerText && node.ownerText.navigationEndpoint &&
-            node.ownerText.navigationEndpoint.browseEndpoint &&
-            node.ownerText.navigationEndpoint.browseEndpoint.browseId) || "",
-          // Every refilled card must show its own thumbnail. If the response
-          // carries none in a shape we know, fall back to YouTube's own
-          // i.ytimg.com url for this id, which always exists.
-          thumbnail: pickThumbnail(node) ||
-            ("https://i.ytimg.com/vi/" + id + "/hqdefault.jpg")
-        });
-      }
-      for (const [key, value] of Object.entries(node)) {
-        if (value && typeof value === "object") {
-          if (NON_FEED_KEYS.has(key)) {
-            refillProbe.nonFeedSkipped += 1;
-            continue;
-          }
-          let childSrc = src;
-          if (key === "richGridRenderer") childSrc = "grid";
-          else if (key === "onResponseReceivedActions") childSrc = "actions";
-          queue.push([value, childSrc, path ? path + "." + key : key]);
-        }
-      }
-    }
-    return out;
-  }
-
-  function runsText(value) {
-    if (!value) return "";
-    if (typeof value === "string") return value;
-    if (typeof value.simpleText === "string") return value.simpleText;
-    if (Array.isArray(value.runs)) return value.runs.map((r) => r.text || "").join("");
-    if (typeof value.content === "string") return value.content;
-    if (value.lockupMetadataViewModel) {
-      return runsText(value.lockupMetadataViewModel.title) ||
-        runsText(value.lockupMetadataViewModel.subtitle);
-    }
-    return "";
-  }
-
-  // The channel name inside the LockupView format. Older shapes exposed the
-  // owner via videoRenderer.ownerText / shortBylineText; the modern lockup
-  // nests it in metadataRows, and the row part that navigates to a channel
-  // page is the channel's own name. Missing it was the 1.24.0 bug where every
-  // cloned card kept the template's channel ("Gamers Nexus" under everything).
-  // Some builds have no rows at all and instead merge the whole
-  // "channel · views · date" line into subtitle; the channel is then the part
-  // before the first separator.
-  function lockupByline(node) {
-    const vm = node.metadata && node.metadata.lockupMetadataViewModel;
-    if (!vm || typeof vm !== "object") return "";
-    const meta = vm.metadata;
-    const rows = Array.isArray(meta && meta.metadataRows)
-      ? meta.metadataRows
-      : (meta && meta.contentMetadataViewModel &&
-          Array.isArray(meta.contentMetadataViewModel.metadataRows)
-        ? meta.contentMetadataViewModel.metadataRows
-        : []);
-    if (rows.length) {
-      let firstNonEmpty = "";
-      for (const row of rows) {
-        if (!row || !Array.isArray(row.metadataParts)) continue;
-        for (const part of row.metadataParts) {
-          if (!part || typeof part !== "object") continue;
-          const text = runsText(part.text);
-          if (!text) continue;
-          if (!firstNonEmpty) firstNonEmpty = text;
-          if (part.navigationEndpoint && part.navigationEndpoint.browseEndpoint) {
-            return text;
-          }
-        }
-      }
-      if (firstNonEmpty) return firstNonEmpty;
-    }
-    const subtitle = typeof vm.subtitle === "string"
-      ? vm.subtitle
-      : (vm.subtitle && typeof vm.subtitle.content === "string" ? vm.subtitle.content : "");
-    if (subtitle && subtitle.trim()) {
-      const first = subtitle.split(/\s*[·•|]\s*/, 1)[0].trim();
-      if (first) return first;
-    }
-    return "";
-  }
-
-  function pickThumbnail(node) {
-    // LockupView nests the picture differently across YouTube builds:
-    //   contentImage.contentImageViewModel.image.sources    (modern)
-    //   contentImage.image.sources                          (earlier)
-    // while the older formats use thumbnail.thumbnails. All shapes are
-    // accepted; the source with the largest declared width wins, bounded to a
-    // sane cap so a feed is not asked to decode a wall of 16k frames.
-    const image =
-      (node.contentImage &&
-        ((node.contentImage.contentImageViewModel &&
-          node.contentImage.contentImageViewModel.image) ||
-          node.contentImage.image)) ||
-      null;
-    const lockupSources = image && image.sources;
-    if (Array.isArray(lockupSources) && lockupSources.length) {
-      let best = null;
-      let bestWidth = 0;
-      for (const source of lockupSources) {
-        if (!source || typeof source.url !== "string") continue;
-        const width = Number(source.width) || 0;
-        if (width > bestWidth && width <= 1280) {
-          best = source.url;
-          bestWidth = width;
-        }
-      }
-      if (bestWidth === 0 && lockupSources[0] && lockupSources[0].url) {
-        return lockupSources[0].url;
-      }
-      return best || "";
-    }
-    const thumbs = node.thumbnail && node.thumbnail.thumbnails;
-    if (!Array.isArray(thumbs)) return "";
-    const sizes = ["maxresdefault", "sddefault", "hqdefault", "mqdefault", "default"];
-    for (const size of sizes) {
-      const hit = thumbs.find((t) => t.url && t.url.includes("/" + size));
-      if (hit) return hit.url;
-    }
-    return (thumbs.find((t) => t.url) || {}).url || "";
-  }
-
-  // The token out of one node, across the shapes YouTube has shipped:
-  // continuationCommand.token, nextContinuationData.continuation,
-  // reloadContinuationData.continuation, or nesting through continuationEndpoint.
-  function tokenFromNode(node) {
-    if (!node || typeof node !== "object") return "";
-    const cmd = node.continuationCommand;
-    if (cmd && typeof cmd.token === "string" && cmd.token) return cmd.token;
-    const next = node.nextContinuationData;
-    if (next && typeof next.continuation === "string" && next.continuation) {
-      return next.continuation;
-    }
-    const reload = node.reloadContinuationData;
-    if (reload && typeof reload.continuation === "string" && reload.continuation) {
-      return reload.continuation;
-    }
-    const endpoint = node.continuationEndpoint;
-    if (endpoint && typeof endpoint === "object") return tokenFromNode(endpoint);
-    return "";
-  }
-
-  // The token of the MAIN grid (richGridRenderer), not of any shelf inside it.
-  // The grid keeps its next-page token in continuations[] or as the LAST entry
-  // of its contents (the sentinel sits after the feed), so both are checked.
-  function tokenFromRichGrid(value) {
-    const queue = [value];
-    const seen = new Set();
-    let guard = 0;
-    while (queue.length && guard < 100000) {
-      guard += 1;
-      const node = queue.shift();
-      if (!node || typeof node !== "object" || seen.has(node)) continue;
-      seen.add(node);
-      const grid = node.richGridRenderer;
-      if (grid && typeof grid === "object") {
-        const continuations = grid.continuations;
-        if (Array.isArray(continuations)) {
-          for (const entry of continuations) {
-            const t = tokenFromNode(entry);
-            if (t) return t;
-          }
-        }
-        const contents = grid.contents;
-        if (Array.isArray(contents)) {
-          for (let i = contents.length - 1; i >= 0; i -= 1) {
-            const item = contents[i];
-            const holder = item && item.continuationItemRenderer;
-            const t = tokenFromNode(holder);
-            if (t) return t;
-          }
-        }
-        return "";
-      }
-      for (const child of Object.values(node)) {
-        if (child && typeof child === "object") queue.push(child);
-      }
-    }
-    return "";
-  }
-
-  // Fallback deep search that prefers the LAST token found. In a browse
-  // response the feed's sentinel sits after the shelves, so "last" usually
-  // means "the grid", whereas a naive first-match returns a shelf's "more".
-  function lastContinuationToken(value) {
-    let found = "";
-    const queue = [value];
-    const seen = new Set();
-    let guard = 0;
-    while (queue.length && guard < 200000) {
-      guard += 1;
-      const node = queue.shift();
-      if (!node || typeof node !== "object" || seen.has(node)) continue;
-      seen.add(node);
-      const t = tokenFromNode(node);
-      if (t) found = t;
-      for (const child of Object.values(node)) {
-        if (child && typeof child === "object") queue.push(child);
-      }
-    }
-    return found;
-  }
-
-  function firstContinuationToken(value) {
-    // A continuation response carries the next token on the ACTION, not inside
-    // a row: onResponseReceivedActions[].appendContinuationItemsAction.
-    // continuation. Prefer it -- it belongs to the feed, never to a shelf.
-    const actions = value && value.onResponseReceivedActions;
-    if (Array.isArray(actions)) {
-      for (const action of actions) {
-        const append = action && action.appendContinuationItemsAction;
-        if (append && typeof append.continuation === "string" && append.continuation) {
-          return append.continuation;
-        }
-      }
-    }
-    // A browse response: the main grid's own token. The old deep walk returned
-    // the FIRST continuationCommand anywhere, which on a multi-shelf page is
-    // usually a music or Shorts shelf, so the chain walked THAT shelf and the
-    // feed "added once, then stopped". Walking the grid keeps the refill on
-    // the real home feed.
-    const gridToken = tokenFromRichGrid(value);
-    if (gridToken) return gridToken;
-    return lastContinuationToken(value);
-  }
-
-  // Builds a card by cloning a real one, so it matches the feed exactly.
-  function buildCardFromTemplate(template, video) {
-    const card = template.cloneNode(true);
-    card.removeAttribute("data-ff-checked");
-    card.removeAttribute("data-ff-pending");
-    card.removeAttribute("data-ff-pending-attempts");
-    card.removeAttribute("data-ff-href");
-    card.removeAttribute("style");
-    card.setAttribute("data-ff-refilled", "1");
-
-    const href = "/watch?v=" + video.id;
-
-    // Every link on the card points at the video. Shorts links are removed so a
-    // refilled Shorts lockup cannot masquerade as a video.
-    card.querySelectorAll("a[href]").forEach((link) => {
-      const current = link.getAttribute("href") || "";
-      if (current.includes("/shorts/")) {
-        link.removeAttribute("href");
-        link.removeAttribute("title");
-        return;
-      }
-      link.setAttribute("href", href);
-    });
-
-    const titleLink = card.querySelector("a#video-title, a#video-title-link, #video-title");
-    if (titleLink) {
-      titleLink.setAttribute("href", href);
-      titleLink.setAttribute("title", video.title || video.id);
-      titleLink.textContent = video.title || video.id;
-    }
-
-    const thumbLink = card.querySelector("a#thumbnail, #thumbnail a, a.yt-lockup-view-model__content-image");
-    if (thumbLink) {
-      thumbLink.setAttribute("href", href);
-      thumbLink.setAttribute("aria-label", video.title || video.id);
-    }
-
-    // Swap the thumbnail image. The card may have several sizes; the last one is
-    // normally the largest actually rendered. A cloned card keeps its original
-    // srcset (used on retina), so both src and srcset are rewritten to the new
-    // picture, and stale sourceset candidates are dropped to force a repaint.
-    const images = card.querySelectorAll("img");
-    if (images.length && video.thumbnail) {
-      images.forEach((img) => {
-        img.setAttribute("src", video.thumbnail);
-        img.setAttribute("srcset", video.thumbnail);
-        const lazy = img.getAttribute("loading");
-        if (!lazy || lazy === "lazy") img.setAttribute("loading", "eager");
-      });
-    }
-
-    // The channel name. FIRST rewrite by content: whatever element(s) still
-    // show the template's captured channel get the new channel (or are
-    // blanked), no matter which layout YouTube shipped. Then a guarded
-    // selector write as a fallback for shapes never seen before: only fire
-    // when the selector's element itself still shows the old channel, so the
-    // views/date line (which is also in the metadata-text spans) can never be
-    // clobbered with a channel name.
-    const templateChannel = refillState.templateChannel || "";
-    rewriteChannelByContent(card, templateChannel, video.byline || "");
-    const byline = card.querySelector(BYLINE_SELECTOR);
-    if (!templateChannel) {
-      // No channel captured from the template: keep the old best-effort write.
-      if (byline) byline.textContent = video.byline || "";
-    } else if (byline && (byline.textContent || "").trim() === templateChannel) {
-      byline.textContent = video.byline || "";
-    }
-
-    return card;
-  }
-
-  function appendRefilledVideos(videos) {
-    const grid = document.querySelector("ytd-rich-grid-renderer #contents, #contents");
-    refillProbe.pageHasWatchAnchors = Boolean(
-      grid && grid.querySelector('a[href*="/watch?v="]')
-    );
-    refillProbe.reachedAppend = true;
-    if (!grid) {
-      refillProbe.noContainer = "no ytd-rich-grid-renderer #contents";
-      return 0;
-    }
-    const template = findRefillTemplate();
-    refillProbe.matchedTemplate = Boolean(template);
-    if (!template) {
-      refillProbe.noContainer = "no template card";
-      return 0;
-    }
-    let added = 0;
-    for (const video of videos) {
-      if (!video.id || refillState.videoIds.has(video.id)) continue;
-      const card = buildCardFromTemplate(template, video);
-      if (!card) continue;
-      // Insert before the trailing sentinel when there still is one, so
-      // YouTube's own pagination keeps seeing its node last.
-      const tail = grid.querySelector(":scope > ytd-continuation-item-renderer");
-      if (tail) grid.insertBefore(card, tail);
-      else grid.appendChild(card);
-      refillState.videoIds.add(video.id);
-      rememberRefillSeen(video.id);
-      added += 1;
-      if ((diag.refillSample || []).length < 40) {
-        diag.refillSample = diag.refillSample || [];
-        diag.refillSample.push((video.title || "?").slice(0, 60) + " ∎ " +
-          (video.byline || "?").slice(0, 30) + " ∎ " + video.id);
-      }
-    }
-    return added;
-  }
-
-  async function innertubeRequest(config, body) {
-    const authorization = await authorizationHeader();
-    const headers = {
-      "Content-Type": "application/json",
-      "X-Origin": "https://www.youtube.com",
-      "X-Youtube-Client-Name": "1",
-      "X-Youtube-Client-Version": config.clientVersion
-    };
-    if (authorization) headers.Authorization = authorization;
-    const response = await fetchWithTimeout(
-      "https://www.youtube.com/youtubei/v1/browse?key=" + encodeURIComponent(config.apiKey) + "&prettyPrint=false",
-      { method: "POST", credentials: "include", headers, body: JSON.stringify(body) },
-      REFILL.requestTimeoutMs
-    );
-    refillProbe.responseStatus = response.status;
-    if (!response.ok) throw new Error("feed request failed with " + response.status);
-    const parsed = await response.json();
-    if (!refillProbe.responseKeys.length) {
-      refillProbe.responseKeys = Array.isArray(parsed)
-        ? ["<array>"]
-        : Object.keys(parsed).slice(0, 12);
-    }
-    return parsed;
-  }
-
-  // Requests one fresh home batch. Pass a continuation token to walk deeper
-  // into the same chain; pass none to start a new home browse.
-  //
-  // Returns { videos, token } where token is the next continuation to use. The
-  // caller owns storing it, so the next refill continues where this one ended
-  // instead of replaying the top of the feed (which is what silently capped the
-  // refill at one run before: every run asked for FEwhat_to_watch from scratch,
-  // got the same first video, and they were all already seen).
-  async function requestFreshFeedVideos(config, token) {
-    refillProbe.idKinds = { videoId: 0, video_id: 0, contentId: 0 };
-    refillProbe.responseKeys = [];
-    refillProbe.sources = { root: 0, grid: 0, actions: 0 };
-    refillProbe.nonFeedSkipped = 0;
-    refillProbe.firstVideoPath = "";
-    refillProbe.videoShape = [];
-    refillProbe.keyInventory = [];
-    const client = { clientName: "WEB", clientVersion: config.clientVersion };
-    if (config.visitorData) client.visitorData = config.visitorData;
-    let data;
-    try {
-      data = await innertubeRequest(config, token
-        ? { context: { client }, continuation: token }
-        : { context: { client }, browseId: "FEwhat_to_watch" });
-    } catch (error) {
-      // A stale continuation token (they expire) must not kill the refill: drop
-      // it and start from a fresh browse instead.
-      if (token) {
-        refillState.nextToken = "";
-        data = await innertubeRequest(config, {
-          context: { client },
-          browseId: "FEwhat_to_watch"
-        });
-      } else {
-        throw error;
-      }
-    }
-    refillProbe.keyInventory = keyInventory(data);
-    return { videos: extractVideos(data), token: firstContinuationToken(data) };
-  }
-
-  async function refillHomeFeed({ fromLookahead = false, probe = false } = {}) {
-    if (refillState.running) return;
-    if (!state.enabled) return;
-    if (location.pathname !== "/") return;
-    // The endless-feed toggle gates the button path; the lookahead path may
-    // refill on its own when the smooth-scroll toggle is on.
-    const minBufferScreens = fromLookahead
-      ? LOOKAHEAD.targetScreens
-      : ENDLESS.minBufferScreens;
-    if (feedBufferScreens() > minBufferScreens) return;
-    // A refill that added nothing recently should not immediately retry: the
-    // feed may be genuinely over, and hammering InnerTube helps no one.
-    if (refillState.lastEmptyAt &&
-        Date.now() - refillState.lastEmptyAt < REFILL.emptyCooldownMs) {
-      return;
-    }
-    // Minimum gap between refill runs, so the lookahead ticking every ~900ms
-    // cannot start a new InnerTube chain on every tick. The refill itself is
-    // fast, but a burst of chains would saturate the API for no benefit.
-    if (refillState.lastRunAt &&
-        Date.now() - refillState.lastRunAt < REFILL.settleQuietMs) {
-      return;
-    }
-    // The recommendation pool is exhausted: a refill added nothing AND the
-    // chain ended, so the same browse answers identically for a while. Back
-    // off until YouTube rotates the pool instead of re-requesting it on every
-    // scroll (the "added once, then only repeats" loop).
-    if (refillState.poolExhaustedAt &&
-        Date.now() - refillState.poolExhaustedAt < REFILL.poolRetryMs) {
-      return;
-    }
-
-    const config = await innertubeConfigFor();
-    if (!config) {
-      diag.refillError = "no YouTube API configuration";
-      return;
-    }
-
-    refillState.running = true;
-    refillState.lastRunAt = Date.now();
-    diag.refillRunning = true;
-    refillProbe.idKinds = { videoId: 0, video_id: 0, contentId: 0 };
-    refillProbe.responseStatus = 0;
-    refillProbe.responseKeys = [];
-    refillProbe.sources = { root: 0, grid: 0, actions: 0 };
-    refillProbe.nonFeedSkipped = 0;
-    refillProbe.firstVideoPath = "";
-    refillProbe.videoShape = [];
-    refillProbe.keyInventory = [];
-    refillProbe.pageHasWatchAnchors = false;
-    refillProbe.matchedTemplate = false;
-    refillProbe.reachedAppend = false;
-    refillProbe.noContainer = "";
-    refillProbe.templateCard = "";
-    refillProbe.templateByline = "";
-    refillProbe.templateChannel = "";
-    refillProbe.templateDom = [];
-    // What was actually handed to the feed this run: "title ∎ channel ∎ id".
-    // The report then shows whether the refill adds music, repeats, or real
-    // lookalikes of the feed, instead of leaving the user to eyeball cards.
-    diag.refillSample = [];
-    diag.refillChainReset = false;
-    seedRefillVideoIds();
-    const known = refillState.videoIds.size;
-
-    try {
-      let added = 0;
-      refillState.batches = 0;
-      let token = refillState.nextToken || "";
-      let chainEnded = false;
-      // A quiet probe (pool was dry) only walks a couple of pages -- enough to
-      // notice new uploads -- instead of re-requesting the whole deep chain.
-      const budget = probe ? REFILL.probeBatches : REFILL.maxBatches;
-      // ONE load event, done in a couple of seconds max. Everything gathered
-      // is delivered as a single wall of cards at the end, not stretched into
-      // a trickle every 10+ seconds. The saved continuation token lets the
-      // next scroll continue deeper into the same chain.
-      const runDeadline = Date.now() + REFILL.burstWindowMs;
-      const pending = [];
-      for (let batch = 0; batch < budget; batch += 1) {
-        if (Date.now() > runDeadline) break;
-        const { videos, token: nextToken } = await requestFreshFeedVideos(config, token);
-        refillState.batches += 1;
-        const fresh = videos.filter((video) => !refillState.videoIds.has(video.id));
-        if (fresh.length) pending.push(...fresh);
-        // Advance the chain even when this batch was all repeats: the next
-        // page of a LIVE chain has genuinely new recommendations, and the
-        // 1.27.0 report shows the feed stalling because the run stopped at
-        // the first all-seen page (~40 runs, ~1 batch each). Only a dead or
-        // echoing chain ends the walk.
-        const advanced = Boolean(nextToken) && nextToken !== token;
-        token = nextToken || "";
-        refillState.nextToken = token;
-        if (!advanced || !token) {
-          // The chain is over, or YouTube echoed the same token back. Either
-          // way there is nothing deeper to walk, so mark it: the next trigger
-          // must start with a FRESH browse (a new recommendation mix) instead
-          // of replaying this dead page. Replaying it is exactly what made the
-          // refill "added once, then stopped".
-          chainEnded = true;
-          break;
-        }
-      }
-      // Deliver everything this event collected as ONE dense append, not a
-      // trickle of per-batch inserts. The scan re-filters the new cards.
-      if (pending.length) {
-        added = appendRefilledVideos(pending);
-        if (homeActive) scheduleHomeScan();
-      }
-      if (chainEnded) {
-        refillState.nextToken = "";
-        diag.refillChainReset = true;
-      }
-      refillState.added += added;
-      diag.refillAdded = (diag.refillAdded || 0) + added;
-      diag.refillBatches = (diag.refillBatches || 0) + refillState.batches;
-      diag.refillError = "";
-      if (added >= REFILL.minYieldToStayOpen) {
-        // A real yield: the pool is alive and the next scroll may ask again.
-        refillState.lastEmptyAt = 0;
-        refillState.poolExhaustedAt = 0;
-        clearPoolProbe();
-        showFeedStatus("Лента продолжена: +" + added);
-      } else if (added === 0 && chainEnded) {
-        // Absolutely nothing and the chain is dead: the pool is dry RIGHT NOW,
-        // but not forever. Quietly re-probe after the rotation window -- new
-        // uploads and YouTube's own rotation eventually return cards on their
-        // own. No reload, no hard stop, no guilt-tripping toast.
-        refillState.lastEmptyAt = Date.now();
-        if (!refillState.poolExhaustedAt) {
-          showFeedStatus("Рекомендации временно закончились — автоматически подтяну новые");
-        }
-        refillState.poolExhaustedAt = Date.now();
-        armPoolProbe();
-      } else if (chainEnded && added <= 1) {
-        // Nearly dry: one card or less from a dead chain. Same quiet reprobe.
-        refillState.lastEmptyAt = Date.now();
-        refillState.poolExhaustedAt = Date.now();
-        armPoolProbe();
-      } else {
-        // A few cards, or the chain is still alive: brief cooldown, then the
-        // next scroll continues from where this run left off. A quiet probe
-        // that found NOTHING stays gated and re-probes after the window --
-        // the pool simply has not rotated this round, and it never gives up.
-        refillState.lastEmptyAt = Date.now();
-        if (probe && added === 0) {
-          refillState.poolExhaustedAt = Date.now();
-          armPoolProbe();
-        } else {
-          // The pool is alive again: drop any stale probe timer so it cannot
-          // fire later and spuriously re-exhaust a healthy pool.
-          refillState.poolExhaustedAt = 0;
-          clearPoolProbe();
-        }
-      }
-    } catch (error) {
-      refillState.error = (error && error.message) || String(error);
-      diag.refillError = refillState.error;
-      refillState.lastEmptyAt = Date.now();
-    } finally {
-      refillState.running = false;
-      diag.refillRunning = false;
-      // Whether a quiet rotation probe is armed (the pool ran dry and the
-      // extension is waiting to re-browse on its own -- no reload needed).
-      diag.refillProbeArmed = Boolean(poolProbeTimer);
-      // Make the last refill's internals visible: response status and keys,
-      // which id shapes the response carried, whether the page had /watch
-      // anchors, and whether a template card matched. A refill that adds 0 must
-      // say why, and this is the only place that can.
-      diag.refillProbe = {
-        status: refillProbe.responseStatus,
-        keys: refillProbe.responseKeys,
-        ids: refillProbe.idKinds,
-        sources: refillProbe.sources,
-        nonFeedSkipped: refillProbe.nonFeedSkipped,
-        firstVideoPath: refillProbe.firstVideoPath,
-        videoShape: refillProbe.videoShape,
-        keyInventory: refillProbe.keyInventory,
-        templateCard: refillProbe.templateCard,
-        templateByline: refillProbe.templateByline,
-        templateChannel: refillProbe.templateChannel,
-        templateDom: refillProbe.templateDom,
-        reachedAppend: refillProbe.reachedAppend,
-        hasAnchors: refillProbe.pageHasWatchAnchors,
-        template: refillProbe.matchedTemplate,
-        why: refillProbe.noContainer || ""
-      };
-      flushDiag(true);
-    }
-
-    if (refillState.error) {
-      showFeedStatus("Не удалось продолжить ленту", true);
-    } else {
-      clearFeedStatus();
-    }
-    void known;
-  }
-
-  const ENDLESS = {
-    // Consider the feed finished once the buffer is this thin ...
-    minBufferScreens: 1.5,
-    // ... and has stayed that way this long before acting.
-    settleQuietMs: 2500,
-    // Never press more often than this.
-    cooldownMs: 12000,
-    // Never present, so only the cap on presses can end it, plus the refill's
-    // own guards. maxPresses stays as a runaway brake.
-    maxPresses: 30,
-    // A candidate button is only accepted within this many screens of the bottom
-    // of the grid. Measured on a real 679-card page: the only "more" buttons
-    // present sat near the top (document positions 442, 860, 30075) and were
-    // shelf and chip controls, so pressing them did nothing.
-    buttonTailScreens: 2,
-    // How long to wait for a pressed button to actually deliver items.
-    settleMs: 8000,
-    settlePollMs: 300
-  };
-
-  // What YouTube calls the reload affordance, across locales.
-  //
-  // Split in two because the bare words are ambiguous. "Show more" and
-  // "показать ещё" mean the feed. Plain "More" and "еще" also mean every shelf
-  // header and chip row on the page, so those only qualify as a last resort and
-  // only when nothing else matched.
-  const ENDLESS_RELOAD_STRONG = [
-    "show more", "load more", "more videos", "see more videos", "show more videos",
-    "показать ещё", "показать еще", "загрузить ещё", "загрузить еще",
-    "ещё видео", "еще видео", "больше видео", "показать больше"
-  ];
-  const ENDLESS_RELOAD_WEAK = ["more", "ещё", "еще", "больше"];
-
-  let endlessTimer = null;
-  let endlessPresses = 0;
-  let endlessEmptyPresses = 0;
-  let endlessLastRun = 0;
-  // Quiet rotation probe: when the recommendation pool runs dry, a timer
-  // re-browses after poolRetryMs so new uploads/rotated recs keep the feed
-  // growing WITHOUT a page reload and without the user doing anything.
-  let poolProbeTimer = null;
-
-  function clearPoolProbe() {
-    if (poolProbeTimer) {
-      clearTimeout(poolProbeTimer);
-      poolProbeTimer = null;
-    }
-  }
-
-  function armPoolProbe() {
-    clearPoolProbe();
-    poolProbeTimer = window.setTimeout(() => {
-      poolProbeTimer = null;
-      refillHomeFeed({ probe: true });
-    }, REFILL.poolRetryMs);
-  }
-  let endlessRunning = false;
-  let statusTimer = null;
-
-  function endlessFeedEnabled() {
-    return Boolean(state.enabled && state.settings.endlessFeed);
-  }
-
-  function resetEndlessFeed() {
-    if (endlessTimer) {
-      clearTimeout(endlessTimer);
-      endlessTimer = null;
-    }
-    endlessPresses = 0;
-    endlessEmptyPresses = 0;
-    endlessLastRun = 0;
-    endlessRunning = false;
-  }
-
-  function stopEndlessFeed() {
-    if (endlessTimer) {
-      clearTimeout(endlessTimer);
-      endlessTimer = null;
-    }
-    clearFeedStatus();
-  }
-
-  // A short, unobtrusive note in the corner. Never silent: if the feed genuinely
-  // cannot be extended, the user is told rather than left with a dead end.
-  function showFeedStatus(text, sticky) {
-    let el = document.getElementById("ff-feed-status");
-    if (!el) {
-      el = document.createElement("div");
-      el.id = "ff-feed-status";
-      (document.body || document.documentElement).appendChild(el);
-    }
-    el.textContent = text;
-    el.setAttribute("data-ff-visible", "1");
-    if (statusTimer) {
-      clearTimeout(statusTimer);
-      statusTimer = null;
-    }
-    if (!sticky) {
-      statusTimer = window.setTimeout(() => {
-        if (el.isConnected) el.removeAttribute("data-ff-visible");
-      }, 4000);
-    }
-  }
-
-  function clearFeedStatus() {
-    const el = document.getElementById("ff-feed-status");
-    if (el) el.remove();
-    if (statusTimer) {
-      clearTimeout(statusTimer);
-      statusTimer = null;
-    }
-  }
-
-  // YouTube has genuinely stopped: thin buffer, no continuation element queued,
-  // and no spinner saying it is still working.
-  function feedIsExhausted() {
-    if (feedBufferScreens() > ENDLESS.minBufferScreens) return false;
-    if (findFeedContinuation()) return false;
-    if (feedIsLoading()) return false;
-    return true;
-  }
-
-  // Finds YouTube's own "Show more" button.
-  //
-  // Two earlier mistakes, both of which the user hit:
-  //
-  //   * Scoping to the continuation area only. The reload UI is not always
-  //     wrapped in ytd-continuation-item-renderer on the modern home feed.
-  //   * Taking the FIRST button whose text matched, from a list that included
-  //     the bare words "more" / "еще". Shelves, chip rows and section headers
-  //     all have buttons called "More", so this reliably clicked something that
-  //     had nothing to do with the feed: the corner showed "updating" and the
-  //     feed never grew.
-  //
-  // So candidates are now scored. An explicit phrase ("show more", "load more",
-  // "показать ещё", "ещё видео") outranks a bare "more", and among equals the
-  // one nearest the bottom of the grid wins -- the feed's own reload control is
-  // always last. Every candidate is recorded so the Diagnostics panel can show
-  // exactly what was on the page.
-  function findFeedReloadButton() {
-    found.button = null;
-    found.candidates = [];
-
-    const grid = document.querySelector("ytd-rich-grid-renderer");
-    if (!grid) return null;
-    const roots = new Set();
-    [
-      "ytd-continuation-item-renderer",
-      "#continuations",
-      "ytd-rich-grid-renderer #continuations",
-      "ytd-rich-grid-renderer #contents"
-    ].forEach((scope) => {
-      grid.querySelectorAll(scope).forEach((el) => roots.add(el));
-    });
-    roots.add(grid);
-
-    const scored = [];
-    const seen = new Set();
-    for (const root of roots) {
-      root.querySelectorAll(
-        "button, ytd-button-renderer, [role='button'], a[href='#'], a[role='button']"
-      ).forEach((button) => {
-        if (seen.has(button)) return;
-        seen.add(button);
-        if (button.disabled || button.hasAttribute("disabled") || button.getAttribute("aria-disabled") === "true") return;
-        if (!button.isConnected) return;
-        const raw =
-          button.getAttribute("aria-label") ||
-          button.getAttribute("title") ||
-          button.innerText ||
-          button.textContent ||
-          "";
-        const label = String(raw).replace(/\s+/g, " ").trim().toLowerCase();
-        if (!label || label.length > 40) return;
-
-        const strong = ENDLESS_RELOAD_STRONG.some((t) => label === t || label.startsWith(t));
-        const weak = !strong && ENDLESS_RELOAD_WEAK.some((t) => label === t || label.startsWith(t));
-        if (!strong && !weak) return;
-
-        let top = 0;
-        try {
-          const rect = button.getBoundingClientRect ? button.getBoundingClientRect() : null;
-          if (rect) top = rect.top + (window.scrollY || 0);
-          else return; // Off-screen and unmeasurable: cannot rank it safely.
-        } catch (error) {
-          return;
-        }
-        scored.push({ button, label, strong, top });
-        found.candidates.push((strong ? "STRONG " : "weak   ") + '"' + label + '" at ' + Math.round(top));
-      });
-    }
-
-    if (!scored.length) return null;
-    scored.sort((a, b) => {
-      if (a.strong !== b.strong) return a.strong ? -1 : 1;
-      return b.top - a.top;
-    });
-
-    // Guard against pressing something that is not the end of the feed.
-    //
-    // Measured on a real page with 679 cards: the only matching buttons sat at
-    // document positions 442, 860 and 30075, all near the top. Those are shelf
-    // and chip controls. YouTube's own reload control is drawn at the very end of
-    // the grid, so a candidate is only accepted when it is within the last
-    // couple of screens. Anything higher up is a decoy and is ignored entirely
-    // rather than ranked lower.
-    let gridBottom = 0;
-    try {
-      const gridRect = grid.getBoundingClientRect ? grid.getBoundingClientRect() : null;
-      gridBottom = gridRect
-        ? gridRect.bottom + (window.scrollY || 0) + window.innerHeight
-        : 0;
-    } catch (error) {
-      gridBottom = 0;
-    }
-    if (gridBottom > 0) {
-      const limit = gridBottom - window.innerHeight * ENDLESS.buttonTailScreens;
-      const atEnd = scored.filter((c) => c.top >= limit);
-      if (!atEnd.length) {
-        found.candidates.push(
-          "rejected: nothing near the end of the grid (bottom " + Math.round(gridBottom) +
-          ", closest candidate at " + Math.round(scored[0].top) + ")"
-        );
-        return null;
-      }
-      scored.length = 0;
-      scored.push(...atEnd);
-    }
-
-    found.button = scored[0].button;
-    found.chosenLabel = scored[0].label;
-    return found.button;
-  }
-
-  const found = { button: null, candidates: [], chosenLabel: "" };
-
-  function scheduleEndlessRecovery() {
-    if (!endlessFeedEnabled() || endlessRunning) return;
-    // Home feed only. A channel or subscriptions page may legitimately end, and
-    // pressing a button there would be wrong. This also means the extension can
-    // never act while the user is watching something.
-    if (location.pathname !== "/") return;
-    if (endlessPresses >= ENDLESS.maxPresses) return;
-    if (endlessEmptyPresses >= 8) return;
-    if (endlessTimer) return;
-    const wait = Math.max(ENDLESS.settleQuietMs, ENDLESS.cooldownMs - (Date.now() - endlessLastRun));
-    endlessTimer = window.setTimeout(() => {
-      endlessTimer = null;
-      pressFeedReloadButton();
-    }, wait);
-  }
-
-  // True when YouTube itself could append the next feed page: a continuation
-  // element exists, or the grid (or its api) exposes a zero-argument method
-  // that loads more. On builds where neither exists the feed is server-rendered
-  // and will never grow on its own; see pressFeedReloadButton.
-  function pageHasContinuationPath() {
-    if (findFeedContinuation()) return true;
-    const { grid, api } = probeContinuationApi();
-    for (const holder of [api, grid]) {
-      if (!holder) continue;
-      for (const name of CONTINUATION_CANDIDATES) {
-        if (typeof holder[name] === "function" && holder[name].length === 0) return true;
-      }
-    }
-    return false;
-  }
-
-  function pressFeedReloadButton() {
-    if (!endlessFeedEnabled() || refillState.running) return;
-    if (endlessPresses >= ENDLESS.maxPresses) return;
-
-    diag.endlessOn = true;
-    diag.exhausted = feedIsExhausted();
-    if (!diag.exhausted) return;
-    snapshotPage();
-
-    // Dead page: no continuation node and no callable grid/api method, so
-    // YouTube cannot append cards by itself and every "more" button in the DOM
-    // is a shelf decoy. Pressing one just burns ENDLESS.settleMs (~8s), plus
-    // the cooldown before it -- that is the multi-second delay the user sees
-    // between reaching the end and cards appearing. Refill directly: InnerTube
-    // is the only mechanism that grows this feed, and it starts in about a
-    // second. A live continuation path still tries the button first, because
-    // on a healthy build the button is the better path.
-    if (!pageHasContinuationPath()) {
-      diag.refillDirect = true;
-      note("endless:refill-direct");
-      refillHomeFeed();
-      return;
-    }
-
-    // YouTube renders no control at the end of the home feed on this build, and
-    // the only "more" buttons on the page belong to shelves. So the feed is
-    // refilled from YouTube's own browse endpoint instead, and the cards are
-    // cloned from a card already on the page.
-    //
-    // The button press stays as a first attempt: if a future YouTube build does
-    // render a real reload control at the end of the feed, that is the better
-    // path and it costs nothing to try.
-    found.button = null;
-    const button = findFeedReloadButton();
-    if (button) {
-      endlessRunning = true;
-      endlessLastRun = Date.now();
-      endlessPresses += 1;
-      diag.presses = endlessPresses;
-      note("endless:press", diag.reloadButton);
-      flushDiag();
-      const before = countFeedItems();
-      try {
-        button.click();
-      } catch (error) {
-        endlessRunning = false;
-        return;
-      }
-      const deadline = Date.now() + ENDLESS.settleMs;
-      const poll = () => {
-        if (countFeedItems() > before) {
-          endlessRunning = false;
-          diag.pressesThatGrew += 1;
-          snapshotPage();
-          flushDiag(true);
-          clearFeedStatus();
-          return;
-        }
-        if (Date.now() >= deadline) {
-          endlessRunning = false;
-          diag.pressesThatGrew += 0;
-          note("endless:press-gave-nothing");
-          snapshotPage();
-          flushDiag(true);
-          // The button did nothing, so fall through to refilling directly.
-          refillHomeFeed();
-          return;
-        }
-        window.setTimeout(poll, ENDLESS.settlePollMs);
-      };
-      window.setTimeout(poll, ENDLESS.settlePollMs);
-      return;
-    }
-
-    // No usable control at the end of the feed. Refill it.
-    diag.presses = endlessPresses;
-    note("endless:refill");
-    refillHomeFeed();
   }
 
   function connectHome() {
@@ -2989,6 +1229,9 @@
       homeObserver.observe(document.documentElement, { childList: true, subtree: true });
     }
     scheduleHomeScan();
+    // Start the background preload loop: wake YouTube's own pagination so the
+    // feed keeps growing out of sight and scrolling down never waits.
+    startPreload();
   }
 
   // Runs synchronously as soon as nodes are inserted. Cards are marked pending
@@ -2997,7 +1240,6 @@
     if (!homeActive || !state.enabled || isShortsPlayerPage()) {
       return;
     }
-    let sawNewCards = false;
     for (const mutation of mutations) {
       if (mutation.addedNodes && mutation.addedNodes.length) {
         for (const node of mutation.addedNodes) {
@@ -3006,31 +1248,23 @@
           }
           if (node.matches && node.matches(CARD_SELECTOR)) {
             markCardPending(node);
-            sawNewCards = true;
           }
           // A card is usually inserted inside a wrapper, so scan one level in.
           if (node.querySelectorAll) {
             const nested = node.querySelectorAll(CARD_SELECTOR);
             if (nested.length) {
               nested.forEach((card) => markCardPending(card));
-              sawNewCards = true;
             }
           }
         }
       }
     }
-    if (sawNewCards) {
-      scheduleHomeScan();
-      schedulePrefetch();
-    } else {
-      scheduleHomeScan();
-    }
+    scheduleHomeScan();
   }
 
   function updatePageMode() {
-    // A navigation is a new feed: reset the lookahead budget.
-    resetFeedLookahead();
-    resetEndlessFeed();
+    // A navigation is a new feed: the preload budget restarts.
+    resetPreload();
     if (isFilterSurface()) {
       connectHome();
     } else {
@@ -4202,12 +2436,8 @@
       "syncProgress",
       "syncFallback",
       "lastSyncResult",
-      "initialSyncDone",
-      "refillSeenVideos"
+      "initialSyncDone"
     ]);
-    if (Array.isArray(saved.refillSeenVideos)) {
-      refillSeen = new Set(saved.refillSeenVideos.filter((v) => typeof v === "string").slice(-REFILL_SEEN_CAP));
-    }
     state.enabled = true;
     state.channels = normalizeChannelState(saved.channels);
     state.blockedChannels = normalizeChannelState(saved.blockedChannels);

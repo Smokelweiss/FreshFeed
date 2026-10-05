@@ -15,8 +15,7 @@
     hidePromoShelves: document.getElementById("hide-promo-shelves"),
     hideSurveys: document.getElementById("hide-surveys"),
     hideGeneratedShelves: document.getElementById("hide-generated-shelves"),
-    endlessFeed: document.getElementById("endless-feed"),
-    feedLookahead: document.getElementById("feed-lookahead"),
+    bgPreload: document.getElementById("bg-preload"),
     filterUploadDate: document.getElementById("filter-upload-date"),
     filterDuration: document.getElementById("filter-duration")
   };
@@ -48,8 +47,7 @@
     hidePromoShelves: false,
     hideSurveys: false,
     hideGeneratedShelves: false,
-    endlessFeed: true,
-    feedLookahead: true,
+    bgPreload: true,
     filterUploadDate: false,
     uploadDateMode: "olderThan",
     uploadDateUnit: "days",

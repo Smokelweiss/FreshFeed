@@ -15,8 +15,7 @@
     hidePromoShelves: document.getElementById("hide-promo-shelves"),
     hideSurveys: document.getElementById("hide-surveys"),
     hideGeneratedShelves: document.getElementById("hide-generated-shelves"),
-    endlessFeed: document.getElementById("endless-feed"),
-    feedLookahead: document.getElementById("feed-lookahead"),
+    bgPreload: document.getElementById("bg-preload"),
     filterUploadDate: document.getElementById("filter-upload-date"),
     filterDuration: document.getElementById("filter-duration")
   };
@@ -48,8 +47,7 @@
     hidePromoShelves: false,
     hideSurveys: false,
     hideGeneratedShelves: false,
-    endlessFeed: true,
-    feedLookahead: true,
+    bgPreload: true,
     filterUploadDate: false,
     uploadDateMode: "olderThan",
     uploadDateUnit: "days",
@@ -99,8 +97,7 @@
     hidePromoShelves: "Brand & promo banners",
     hideSurveys: "Surveys & upsell popups",
     hideGeneratedShelves: "Generated topic shelves",
-    endlessFeed: "Endless feed",
-    feedLookahead: "Smooth scroll (background preload)",
+    bgPreload: "Background feed preload (loads ahead of your scroll)",
     filterUploadDate: "Upload date",
     filterDuration: "Duration"
   };
@@ -274,139 +271,49 @@
   }
 
   // Plain-text report of what the extension actually saw on the page. The two
-  // feed features could not be verified from the development browser, because
-  // YouTube never hydrates its rich grid there, so every claim about why they
-  // failed was an inference. This is the measurement instead.
+  // Diagnostics: what the content script actually sees, shown on the
+  // options page so a feature that is not running says why instead of
+  // leaving the user to guess. Covers the filter, the background preload
+  // and subscription sync.
   function renderDiagnostics(data) {
     const lines = [];
     lines.push(data.lastSyncResult || "No sync details.");
     lines.push("");
-    lines.push("=== Feed features (observed on the real page) ===");
-
     const d = data.feedDiag;
     if (!d || !d.updatedAt) {
-      lines.push("Nothing observed yet. Open the YouTube home page, scroll it,");
+      lines.push("Nothing observed yet. Open the YouTube home page, wait a moment,");
       lines.push("then reopen this tab. If this stays empty the content script");
       lines.push("is not running, which is a different problem.");
       return lines.join("\n");
     }
-
     const when = new Date(d.updatedAt).toLocaleString();
     const yes = (v) => (v ? "yes" : "no");
     lines.push("observed: " + when + " on " + (d.page || "?"));
     lines.push("");
-    lines.push("Page");
-    lines.push("  cards on feed      : " + d.cards);
-    lines.push("  buffer below fold  : " + d.bufferScreens + " screens");
-    lines.push("  continuation node  : " + yes(d.sentinel) + (d.sentinelInView ? " (on screen)" : " (off screen)"));
-    lines.push("  rich grid present  : " + yes(d.gridPresent));
-    lines.push("  grid.api present   : " + yes(d.gridApiPresent));
-    lines.push("  grid items in data : " + (d.gridItemsLength === null || d.gridItemsLength === undefined ? "n/a" : d.gridItemsLength));
-    lines.push("  grid children      : " + (d.contentsChildren === null || d.contentsChildren === undefined ? "n/a" : d.contentsChildren));
-    lines.push("  methods on grid    : " + ((d.methodsOnGrid || []).join(", ") || "none"));
-    lines.push("  methods on api     : " + ((d.methodsOnApi || []).join(", ") || "none"));
-    lines.push("  last grid children : " + ((d.tailTags || []).join(", ") || "none"));
-    lines.push("  continuation-ish   : " + ((d.continuationishTags || []).join(", ") || "none"));
-    if ((d.gridDataKeys || []).length) {
-      d.gridDataKeys.forEach((k) => lines.push("  data " + k));
-    }
+    lines.push("Filter");
+    lines.push("  cards checked      : " + (d.checked || 0));
+    lines.push("  cards hidden       : " + (d.hidden || 0));
     lines.push("");
-    lines.push("  grid members that look relevant:");
-    lines.push("      " + ((d.gridMembers || []).join(", ") || "none"));
-    const tpl = d.templateCardProbe;
-    if (tpl && tpl.card) {
-      lines.push("");
-      lines.push("  template card (live probe):");
-      lines.push("      " + tpl.card +
-        (tpl.channel ? "   captured channel: \"" + String(tpl.channel).slice(0, 30) + "\"" : "") +
-        (tpl.byline ? "   byline el: " + tpl.byline : ""));
-      if ((tpl.dom || []).length) {
-        lines.push("      dom: " + tpl.dom.slice(0, 14).join(" | ") + (tpl.dom.length > 14 ? " | …(" + (tpl.dom.length - 14) + " more)" : ""));
-      }
-    }
-    if ((d.apiMembers || []).length) {
-      lines.push("  api members:");
-      lines.push("      " + d.apiMembers.join(", "));
-    }
-    if ((d.appMembers || []).length) {
-      lines.push("  app members:");
-      lines.push("      " + d.appMembers.join(", "));
-    }
-    lines.push("");
-    lines.push("Smooth scroll");
-    lines.push("  loop ticks         : " + d.ticks);
-    lines.push("  rounds run         : " + d.rounds);
-    lines.push("  lookahead active   : " + yes(d.lookaheadOn));
-    lines.push("  setting (smooth)   : " + yes(d.lookaheadSetting) + (d.lookaheadGate ? "   \u2190 " + d.lookaheadGate : ""));
-    lines.push("  setting (endless)  : " + yes(d.endlessSetting) + "   master enabled: " + yes(d.enabledSetting));
-    lines.push("  requests issued    : " + ((d.requests || []).join(", ") || "none"));
-    lines.push("  times feed grew    : " + d.growthSeen);
-    lines.push("  dead rounds        : " + d.deadRounds);
-    lines.push("  switched off       : " + yes(d.stopped));
-    if (d.stoppedBecause) lines.push("  why off            : " + d.stoppedBecause);
-    lines.push("");
-    lines.push("Endless feed");
-    lines.push("  feed seen exhausted: " + yes(d.exhausted));
-    lines.push("  reload button found: " + (d.reloadButton ? '"' + d.reloadButton + '"' : "no"));
-    const cands = d.reloadCandidates || [];
-    lines.push("  buttons considered : " + (cands.length ? "" : "none"));
-    cands.forEach((c) => lines.push("      " + c));
-    lines.push("  presses            : " + d.presses);
-    lines.push("  presses that grew  : " + d.pressesThatGrew);
-    lines.push("  refilled directly  : " + yes(d.refillDirect));
-    lines.push("");
-    lines.push("Feed refill (clones a real card, uses InnerTube)");
-    lines.push("  running now        : " + yes(d.refillRunning));
-    lines.push("  cards added        : " + (d.refillAdded || 0));
-    lines.push("  batches requested  : " + (d.refillBatches || 0));
-    lines.push("  saved continuation : " + yes(d.refillTokenChain));
-    lines.push("  chain reset on stall: " + yes(d.refillChainReset));
-    lines.push("  pool exhausted      : " + yes(d.refillPoolExhausted) + (d.refillPoolExhausted ? "   (backing off until YouTube rotates)" : ""));
-    lines.push("  auto re-probe armed : " + yes(d.refillProbeArmed) + (d.refillProbeArmed ? "   (quietly re-checks YouTube in ~45s, no reload)" : ""));
-    lines.push("  last error         : " + (d.refillError || "none"));
-    const p = d.refillProbe;
-    if (p && (p.keys.length || p.status)) {
-      lines.push("  response status    : " + (p.status || 0));
-      lines.push("  top-level keys     : " + (p.keys.length ? p.keys.join(", ") : "(none)"));
-      lines.push("  videoId / video_id / contentId: " + p.ids.videoId + " / " + p.ids.video_id + " / " + p.ids.contentId);
-      lines.push("  reached append     : " + yes(p.reachedAppend));
-      lines.push("  page has /watch anchors: " + yes(p.hasAnchors) + "  template matched: " + yes(p.template));
-      if (p.sources) {
-        lines.push("  video sources        : grid " + (p.sources.grid || 0) + " / actions " + (p.sources.actions || 0) + " / other " + (p.sources.root || 0) + (p.nonFeedSkipped ? "   (skipped " + p.nonFeedSkipped + " non-feed subtrees)" : ""));
-      }
-      if (p.firstVideoPath) {
-        lines.push("  first video path     : " + p.firstVideoPath);
-        if (p.videoShape && p.videoShape.length) {
-          lines.push("  video node keys      : " + p.videoShape);
-        }
-      }
-      if (p.keyInventory && p.keyInventory.length) {
-        lines.push("  response key counts  : ");
-        p.keyInventory.slice(0, 16).forEach((k) => lines.push("      " + k));
-        if (p.keyInventory.length > 16) {
-          lines.push("      … (" + (p.keyInventory.length - 16) + " more)");
-        }
-      }
-      if (p.templateCard) lines.push("  template card        : " + p.templateCard);
-      if (p.templateByline) lines.push("  template byline      : " + p.templateByline);
-      if (p.templateChannel) lines.push("  template channel     : \"" + String(p.templateChannel).slice(0, 40) + "\"");
-      if ((p.templateDom || []).length) {
-        lines.push("  template dom         : " + p.templateDom.slice(0, 10).join(" | ") + (p.templateDom.length > 10 ? " | …" : ""));
-      }
-      if (p.why) lines.push("  why nothing added  : " + p.why);
-    }
-    const sample = d.refillSample || [];
-    if (sample.length) {
-      lines.push("  added this run       : " + sample.length + " cards");
-      sample.forEach((line) => lines.push("      " + line));
-    }
+    lines.push("Background feed preload (native, no fabricated cards)");
+    lines.push("  active             : " + yes(d.preloadActive) + (d.preloadGate ? "   \u2190 " + d.preloadGate : ""));
+    lines.push("  setting            : " + yes(d.preloadSetting));
+    lines.push("  hook found         : " + (d.preloadHook || "?") +
+      (d.preloadHook === "sentinel"
+        ? "   (sentinel present - preload can grow the feed)"
+        : d.preloadHook === "none"
+          ? "   (no continuation sentinel on this build - nothing to wake)"
+          : ""));
+    lines.push("  rounds run         : " + (d.preloadRounds || 0));
+    lines.push("  pages that grew    : " + (d.preloadGrowth || 0));
+    lines.push("  dead rounds        : " + (d.preloadDeadRounds || 0));
     lines.push("");
     lines.push("Subscription sync");
-    lines.push("  channels           : " + d.syncChannels);
+    lines.push("  channels           : " + (d.syncChannels || 0));
     lines.push("  reported partial   : " + yes(d.syncPartial));
-    lines.push("  pages unavailable  : " + d.syncSkippedPages);
+    lines.push("  pages unavailable  : " + (d.syncSkippedPages || 0));
     return lines.join("\n");
   }
+
 
   function render(data) {
     const settings = settingsOf(data);
