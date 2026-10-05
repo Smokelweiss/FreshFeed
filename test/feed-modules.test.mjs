@@ -194,7 +194,7 @@ const browserStub = {
 const factory = new Function(
   'CARD_SELECTOR', 'state', 'isFilterSurface', 'isShortsPlayerPage', 'browser',
   'document', 'window', 'sessionStorage', 'location', 'MutationObserver',
-  MODULE + '\nreturn { LOOKAHEAD, ENDLESS, REFILL, diag, schedulePrefetch, stopFeedLookahead, resetFeedLookahead, resetEndlessFeed, stopEndlessFeed, feedIsExhausted, scheduleEndlessRecovery, feedBufferScreens, requestMoreFromYouTube, armLookaheadTimer, feedIsLoading, countFeedItems, findFeedReloadButton, pressFeedReloadButton, snapshotPage, flushDiag, extractVideos, runsText, pickThumbnail, firstContinuationToken, buildCardFromTemplate, appendRefilledVideos, seedRefillVideoIds };'
+  MODULE + '\nreturn { LOOKAHEAD, ENDLESS, REFILL, diag, refillState, schedulePrefetch, stopFeedLookahead, resetFeedLookahead, resetEndlessFeed, stopEndlessFeed, feedIsExhausted, scheduleEndlessRecovery, feedBufferScreens, requestMoreFromYouTube, armLookaheadTimer, feedIsLoading, countFeedItems, findFeedReloadButton, pressFeedReloadButton, snapshotPage, flushDiag, extractVideos, runsText, pickThumbnail, firstContinuationToken, buildCardFromTemplate, appendRefilledVideos, seedRefillVideoIds, refillHomeFeed };'
 )
 const M = factory(CARD_SELECTOR, state, isFilterSurface, isShortsPlayerPage, browserStub,
   globalThis.document, globalThis.window, globalThis.sessionStorage, globalThis.location, globalThis.MutationObserver)
@@ -902,6 +902,65 @@ scopeRoots = [makeScope('ytd-continuation-item-renderer')]
 M.pressFeedReloadButton()
 check('dead page: decoy button is never clicked', world.clicks === 0, 'clicks=' + world.clicks)
 check('dead page: refill-direct is flagged', M.diag.refillDirect === true)
+
+// ------------------------------------------ refill: bugs of 1.24.0 (content)
+// The lockup format keeps the channel in metadataRows (the part that links to
+// the channel page), not in ownerText. Missing it left the clone's TEMPLATE
+// channel under every refilled card (the "Gamers Nexus under everything" bug).
+const lockupBylineResponse = {
+  contents: {
+    twoColumnBrowseResultsRenderer: {
+      tabs: [{
+        tabRenderer: {
+          content: {
+            richGridRenderer: {
+              contents: [
+                { richItemRenderer: { content: { lockupViewModel: {
+                  video_id: 'jjjjjjjjjjj',
+                  metadata: { lockupMetadataViewModel: {
+                    title: { content: 'Lockup with channel' },
+                    metadata: { contentMetadataViewModel: { metadataRows: [
+                      { metadataParts: [
+                        { text: { content: '@lockupchannel' },
+                          navigationEndpoint: { browseEndpoint: { browseId: 'UClockupchannel' } } },
+                        { text: { content: '1.2M subscribers' } },
+                        { text: { content: '3 days ago' } }
+                      ] }
+                    ] } }
+                  } }
+                } } } }
+              ]
+            }
+          }
+        }
+      }]
+    }
+  }
+}
+const lockupBylineVideos = M.extractVideos(lockupBylineResponse)
+check('reads the channel name from lockup metadata rows',
+  lockupBylineVideos[0] && lockupBylineVideos[0].byline === '@lockupchannel',
+  'byline=' + (lockupBylineVideos[0] || {}).byline)
+
+// Even when a shape is missed, the cloned card must never keep the template's
+// channel: the byline is written unconditionally, blanking a stale name.
+const noBylineVideo = { ...extracted[0], byline: "" }
+const blankCard = M.buildCardFromTemplate(makeRealCard(), noBylineVideo)
+check('blanks the template channel when the response has no byline',
+  blankCard.querySelector('#byline').innerText === '',
+  'byline=' + JSON.stringify(blankCard.querySelector('#byline').innerText))
+
+// An exhausted recommendation pool must back off instead of re-requesting the
+// same browse on every scroll ("added once, then only repeats").
+M.REFILL.poolRetryMs = 60000
+M.refillState.poolExhaustedAt = Date.now()
+M.refillState.lastRunAt = 0
+M.refillState.running = false
+M.refillHomeFeed()
+check('exhausted pool: refill backs off instead of re-requesting',
+  M.diag.refillRunning === false && M.refillState.lastRunAt === 0,
+  'running=' + M.diag.refillRunning + ' lastRunAt=' + M.refillState.lastRunAt)
+M.refillState.poolExhaustedAt = 0
 
 console.log('\n=== ' + pass + ' passed, ' + fail + ' failed ===')
 process.exit(fail ? 1 : 0)

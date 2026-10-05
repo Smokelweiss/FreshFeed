@@ -1177,6 +1177,9 @@
     // refilling, and whether a refill dropped its stale continuation token.
     refillDirect: false,
     refillChainReset: false,
+    // True while the recommendation pool is exhausted and refills are backing
+    // off until YouTube rotates it.
+    refillPoolExhausted: false,
     syncChannels: 0,
     syncPartial: false,
     syncSkippedPages: 0
@@ -1310,6 +1313,7 @@
     diag.lookaheadSetting = Boolean(state.settings.feedLookahead);
     diag.endlessSetting = Boolean(state.settings.endlessFeed);
     diag.enabledSetting = Boolean(state.enabled);
+    diag.refillPoolExhausted = Boolean(refillState.poolExhaustedAt);
     diagDirty = true;
   }
 
@@ -1584,9 +1588,21 @@
     // After a refill that added nothing, wait this long before trying again.
     // The feed may simply be over; hammering InnerTube helps no one.
     emptyCooldownMs: 15000,
+    // After the recommendation POOL is exhausted (a refill added nothing AND
+    // the continuation chain ended), the same browse answers identically for a
+    // while. Back off this long before probing for a newly-rotated pool.
+    poolRetryMs: 120000,
     requestTimeoutMs: 12000,
     settleQuietMs: 3000
   };
+
+  // Videos ever handed out by a refill, kept across page loads so a fresh
+  // session does not re-append the same recommendations again (the 1.24.0
+  // complaint: the second attempt added ~the same videos as the first).
+  const REFILL_SEEN_KEY = "refillSeenVideos";
+  const REFILL_SEEN_CAP = 3000;
+  let refillSeen = new Set();
+  let refillSeenSaveTimer = null;
 
   // The InnerTube credentials live on the page's own ytcfg. Reading them from
   // the DOM source is the fallback for the rare case where ytcfg is not
@@ -1637,6 +1653,10 @@
     // How long to wait after a refill that added nothing before trying again.
     // Prevents hammering InnerTube when the feed is genuinely at its end.
     lastEmptyAt: 0,
+    // When the recommendation pool ran out (a refill added nothing AND the
+    // chain ended). A fresh browse returns the same pool for a while, so
+    // refills are gated until YouTube rotates it.
+    poolExhaustedAt: 0,
     // When the last refill actually started, so repeated lookahead ticks cannot
     // fire a new InnerTube chain every 900ms.
     lastRunAt: 0
@@ -1654,9 +1674,12 @@
   };
 
   // Video ids already in the grid, so a refill never repeats what the user has
-  // already scrolled past.
+  // already scrolled past. The cross-session seen list is merged in too, so a
+  // fresh page load does not re-append the same recommendations the previous
+  // session already handed out.
   function seedRefillVideoIds() {
     refillState.videoIds = new Set();
+    refillSeen.forEach((id) => refillState.videoIds.add(id));
     document.querySelectorAll(CARD_SELECTOR).forEach((card) => {
       const href = firstVideoHref(card);
       if (!href) return;
@@ -1664,6 +1687,26 @@
       if (match) refillState.videoIds.add(match[1]);
     });
     return refillState.videoIds.size;
+  }
+
+  // Records a handed-out video in the cross-session seen list. The save is
+  // debounced so a refill that appends a few batches does not write storage on
+  // every card.
+  function rememberRefillSeen(id) {
+    if (!id || refillSeen.has(id)) return;
+    refillSeen.add(id);
+    if (refillSeenSaveTimer) return;
+    refillSeenSaveTimer = window.setTimeout(() => {
+      refillSeenSaveTimer = null;
+      if (refillSeen.size <= REFILL_SEEN_CAP) {
+        browser.storage.local.set({ [REFILL_SEEN_KEY]: Array.from(refillSeen) }).catch(() => {});
+        return;
+      }
+      // Trim to the newest ids, then persist.
+      const list = Array.from(refillSeen).slice(-REFILL_SEEN_CAP);
+      refillSeen = new Set(list);
+      browser.storage.local.set({ [REFILL_SEEN_KEY]: list }).catch(() => {});
+    }, 2000);
   }
 
   // A real card to copy the shape of. Prefer a plain video card over a shelf or
@@ -1736,7 +1779,8 @@
           title: runsText(node.title) ||
             runsText(node.headline) ||
             runsText(node.metadata),
-          byline: runsText(node.ownerText) ||
+          byline: lockupByline(node) ||
+            runsText(node.ownerText) ||
             runsText(node.shortBylineText) ||
             runsText(node.longBylineText) ||
             runsText(node.videoOwnerRenderer && node.videoOwnerRenderer.title),
@@ -1771,6 +1815,37 @@
         runsText(value.lockupMetadataViewModel.subtitle);
     }
     return "";
+  }
+
+  // The channel name inside the LockupView format. Older shapes exposed the
+  // owner via videoRenderer.ownerText / shortBylineText; the modern lockup
+  // nests it in metadataRows, and the row part that navigates to a channel
+  // page is the channel's own name. Missing it was the 1.24.0 bug where every
+  // cloned card kept the template's channel ("Gamers Nexus" under everything).
+  function lockupByline(node) {
+    const meta = node.metadata && node.metadata.lockupMetadataViewModel &&
+      node.metadata.lockupMetadataViewModel.metadata;
+    if (!meta || typeof meta !== "object") return "";
+    const rows = Array.isArray(meta.metadataRows)
+      ? meta.metadataRows
+      : (meta.contentMetadataViewModel &&
+          Array.isArray(meta.contentMetadataViewModel.metadataRows)
+        ? meta.contentMetadataViewModel.metadataRows
+        : []);
+    let firstNonEmpty = "";
+    for (const row of rows) {
+      if (!row || !Array.isArray(row.metadataParts)) continue;
+      for (const part of row.metadataParts) {
+        if (!part || typeof part !== "object") continue;
+        const text = runsText(part.text);
+        if (!text) continue;
+        if (!firstNonEmpty) firstNonEmpty = text;
+        if (part.navigationEndpoint && part.navigationEndpoint.browseEndpoint) {
+          return text;
+        }
+      }
+    }
+    return firstNonEmpty;
   }
 
   function pickThumbnail(node) {
@@ -1969,9 +2044,10 @@
     }
 
     const byline = card.querySelector("#byline, .yt-content-metadata-view-model__metadata-text");
-    if (byline && video.byline) {
-      byline.textContent = video.byline;
-    }
+    // Always write the byline, including to an empty string: a cloned card
+    // carries the template channel's name, and an extraction miss must blank it
+    // (the 1.24.0 bug: every refilled card showed the template's channel).
+    if (byline) byline.textContent = video.byline || "";
 
     return card;
   }
@@ -2003,6 +2079,7 @@
       if (tail) grid.insertBefore(card, tail);
       else grid.appendChild(card);
       refillState.videoIds.add(video.id);
+      rememberRefillSeen(video.id);
       added += 1;
     }
     return added;
@@ -2090,6 +2167,14 @@
         Date.now() - refillState.lastRunAt < REFILL.settleQuietMs) {
       return;
     }
+    // The recommendation pool is exhausted: a refill added nothing AND the
+    // chain ended, so the same browse answers identically for a while. Back
+    // off until YouTube rotates the pool instead of re-requesting it on every
+    // scroll (the "added once, then only repeats" loop).
+    if (refillState.poolExhaustedAt &&
+        Date.now() - refillState.poolExhaustedAt < REFILL.poolRetryMs) {
+      return;
+    }
 
     const config = await innertubeConfigFor();
     if (!config) {
@@ -2153,9 +2238,21 @@
       diag.refillError = "";
       if (added > 0) {
         refillState.lastEmptyAt = 0;
+        // The pool produced something, so it is alive again.
+        refillState.poolExhaustedAt = 0;
         showFeedStatus("Лента продолжена: +" + added);
       } else {
         refillState.lastEmptyAt = Date.now();
+        if (chainEnded) {
+          // Genuinely over: the chain ended and nothing was added. Tell the
+          // user once, and stop repeating the identical browse request for a
+          // while. A fresh rotation (or a page reload, which resets this state)
+          // brings new recommendations.
+          if (!refillState.poolExhaustedAt) {
+            refillState.poolExhaustedAt = Date.now();
+            showFeedStatus("Лента окончена — новые рекомендации появятся позже или после обновления страницы");
+          }
+        }
       }
     } catch (error) {
       refillState.error = (error && error.message) || String(error);
@@ -3743,8 +3840,12 @@
       "syncProgress",
       "syncFallback",
       "lastSyncResult",
-      "initialSyncDone"
+      "initialSyncDone",
+      "refillSeenVideos"
     ]);
+    if (Array.isArray(saved.refillSeenVideos)) {
+      refillSeen = new Set(saved.refillSeenVideos.filter((v) => typeof v === "string").slice(-REFILL_SEEN_CAP));
+    }
     state.enabled = true;
     state.channels = normalizeChannelState(saved.channels);
     state.blockedChannels = normalizeChannelState(saved.blockedChannels);

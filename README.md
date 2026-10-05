@@ -134,6 +134,17 @@ Smooth scroll / Endless feed / master toggle states, the exact gate that held
 lookahead back ("Smooth scroll toggle is OFF" and similar), when the refill
 bypassed the decoy button, and when a stalled continuation chain was reset.
 
+Refilled cards also carry their real channel. The lockup format keeps the
+owner in metadata rows (not ownerText), so the channel name is read from
+there; when it cannot be read, the cloned card's byline is blanked instead of
+leaving the template card's channel under every video. Videos already handed
+out by a refill are remembered across page loads, so a fresh session no longer
+re-append the same recommendations ("почти идентичных предыдущей попытке").
+When the recommendation pool is genuinely over (nothing added and the chain
+ended), the refill says so once and backs off for a couple of minutes until
+YouTube rotates the pool, instead of silently re-requesting the identical
+browse on every scroll; a page reload starts a fresh rotation.
+
 
 ## Quick start
 

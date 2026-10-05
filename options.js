@@ -350,6 +350,7 @@
     lines.push("  batches requested  : " + (d.refillBatches || 0));
     lines.push("  saved continuation : " + yes(d.refillTokenChain));
     lines.push("  chain reset on stall: " + yes(d.refillChainReset));
+    lines.push("  pool exhausted      : " + yes(d.refillPoolExhausted) + (d.refillPoolExhausted ? "   (backing off until YouTube rotates)" : ""));
     lines.push("  last error         : " + (d.refillError || "none"));
     const p = d.refillProbe;
     if (p && (p.keys.length || p.status)) {
