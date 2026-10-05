@@ -109,12 +109,30 @@ page, and add nothing (the "loaded once, then stopped" regression). When a
 token expires or the chain runs out, the refill starts a fresh browse and
 backs off for a while instead of hammering InnerTube.
 
-Refills are also small and incremental: each run fetches at most two batches
-and appends cards as each one arrives, so the first pictures appear in
-about a second rather than after a long request chain. Smooth scroll and
-endless feed share the same refill: when there is no continuation element to
-nudge (a build where Polymer never hydrates the grid), smooth scroll hands the
-work to the refill so the buffer keeps filling as the user reads.
+The token is taken from the **main grid**, never from a shelf. A naive deep
+scan of a browse response returns the first `continuationItemRenderer`
+anywhere, which on a multi-shelf home page is usually a music or Shorts
+shelf's "more" — the refill then walked THAT shelf ("подавляющая часть —
+музыка") until its short chain ended and nothing more was ever appended.
+Continuation responses carry the next token on the action
+(`appendContinuationItemsAction.continuation`), browse responses keep it in
+the `richGridRenderer`, and both are preferred over the flat scan. Music,
+Shorts, shelf and playlist subtrees are also skipped when turning the
+response into feed cards, so a refill adds feed, not a music wall.
+
+Refills are also small and incremental: each run fetches up to three batches
+and appends cards as each one arrives, so the first pictures appear in about
+a second rather than after a long request chain. Smooth scroll and endless
+feed share the same refill: when there is no continuation element to nudge (a
+build where Polymer never hydrates the grid), smooth scroll hands the work to
+the refill so the buffer keeps filling as the user reads, and endless feed
+refills directly instead of wasting ~8 seconds pressing a shelf's dead "more"
+button first (that wait was the "подгружало секунд 10–20" complaint).
+
+Diagnostics can now explain a feed feature that is not running: it shows the
+Smooth scroll / Endless feed / master toggle states, the exact gate that held
+lookahead back ("Smooth scroll toggle is OFF" and similar), when the refill
+bypassed the decoy button, and when a stalled continuation chain was reset.
 
 
 ## Quick start

@@ -1072,8 +1072,14 @@
     return remaining / Math.max(1, window.innerHeight);
   }
 
-  function stopFeedLookahead() {
+  function stopFeedLookahead(gate) {
     lookaheadActive = false;
+    // Diagnostics must explain a stalled feature, and the only way it can be
+    // switched off on this build is through one of the gates in
+    // schedulePrefetch. Recording the reason turns "no ticks" into "the Smooth
+    // scroll toggle is OFF" instead of an unsolvable mystery.
+    diag.lookaheadOn = false;
+    if (gate) diag.lookaheadGate = gate;
     if (lookaheadTimer) {
       clearTimeout(lookaheadTimer);
       lookaheadTimer = null;
@@ -1086,6 +1092,7 @@
 
   function resetFeedLookahead() {
     stopFeedLookahead();
+    diag.lookaheadGate = "";
     lookaheadRounds = 0;
     lookaheadDeadRounds = 0;
     lookaheadLastRun = 0;
@@ -1159,6 +1166,17 @@
     // of replaying the top of the feed (the "loaded once, then stopped"
     // symptom when this is unreachable).
     refillTokenChain: false,
+    // Why smooth scroll is not running, when it is not: the exact gate that
+    // held it back, shown verbatim in Diagnostics so a "dead" feature is
+    // explained instead of guessed at.
+    lookaheadGate: "",
+    lookaheadSetting: true,
+    endlessSetting: true,
+    enabledSetting: true,
+    // The endless path skipped the (dead) reload button and went straight to
+    // refilling, and whether a refill dropped its stale continuation token.
+    refillDirect: false,
+    refillChainReset: false,
     syncChannels: 0,
     syncPartial: false,
     syncSkippedPages: 0
@@ -1287,6 +1305,11 @@
       : "";
     diag.reloadCandidates = (found.candidates || []).slice(0, 12);
     diag.refillTokenChain = Boolean(refillState.nextToken);
+    // The settings that gate the feed features, so Diagnostics explains why a
+    // feature is off instead of leaving "0 ticks" to be guessed at.
+    diag.lookaheadSetting = Boolean(state.settings.feedLookahead);
+    diag.endlessSetting = Boolean(state.settings.endlessFeed);
+    diag.enabledSetting = Boolean(state.enabled);
     diagDirty = true;
   }
 
@@ -1302,15 +1325,28 @@
 
   function schedulePrefetch() {
     if (!state.enabled || !state.settings.feedLookahead || !LOOKAHEAD.enabled) {
-      stopFeedLookahead();
+      stopFeedLookahead(
+        !state.enabled
+          ? "master switch is OFF"
+          : !state.settings.feedLookahead
+            ? "Smooth scroll toggle is OFF"
+            : "lookahead disabled"
+      );
       return;
     }
     if (!isFilterSurface() || isShortsPlayerPage() || location.pathname !== "/") {
-      stopFeedLookahead();
+      stopFeedLookahead(
+        !isFilterSurface()
+          ? "not a feed surface"
+          : isShortsPlayerPage()
+            ? "shorts player page"
+            : "not the home page"
+      );
       return;
     }
     if (!lookaheadActive) {
       lookaheadActive = true;
+      diag.lookaheadGate = "";
       lookaheadScrollHandler = () => runLookahead();
       window.addEventListener("scroll", lookaheadScrollHandler, { passive: true });
     }
@@ -1544,7 +1580,7 @@
   // without depending on a data model that is not there.
   const REFILL = {
     // How many fresh batches to request per refill.
-    maxBatches: 2,
+    maxBatches: 3,
     // After a refill that added nothing, wait this long before trying again.
     // The feed may simply be over; hammering InnerTube helps no one.
     emptyCooldownMs: 15000,
@@ -1649,6 +1685,19 @@
     return refillState.templateCard;
   }
 
+  // Subtrees that are NOT the home feed. Music mixes, Shorts, shelves and
+  // playlists are either irrelevant to the main grid or already rendered by
+  // YouTube elsewhere on the page, and refilling them made the 1.22.0 report
+  // "подавляющая часть - музыка" (mostly music, nothing like the home feed).
+  // Skipping them keeps the refill inside the rich grid, so the added cards
+  // match the feed the user is actually reading.
+  const NON_FEED_KEYS = new Set([
+    "richShelfRenderer", "shelfRenderer", "musicShelfRenderer", "reelShelfRenderer",
+    "horizontalCardListRenderer", "expandedShelfContentsRenderer",
+    "merchandiseShelfRenderer", "heroShelfRenderer", "shortsLockupViewModel",
+    "playlistVideoListRenderer", "compactRadioRenderer", "radioRenderer"
+  ]);
+
   // Pulls every video out of one browse/continuation response.
   //
   // YouTube has shipped several id shapes for the same thing, and the page that
@@ -1701,8 +1750,11 @@
             ("https://i.ytimg.com/vi/" + id + "/hqdefault.jpg")
         });
       }
-      for (const value of Object.values(node)) {
-        if (value && typeof value === "object") queue.push(value);
+      for (const [key, value] of Object.entries(node)) {
+        if (value && typeof value === "object") {
+          if (NON_FEED_KEYS.has(key)) continue;
+          queue.push(value);
+        }
       }
     }
     return out;
@@ -1761,7 +1813,70 @@
     return (thumbs.find((t) => t.url) || {}).url || "";
   }
 
-  function firstContinuationToken(value) {
+  // The token out of one node, across the shapes YouTube has shipped:
+  // continuationCommand.token, nextContinuationData.continuation,
+  // reloadContinuationData.continuation, or nesting through continuationEndpoint.
+  function tokenFromNode(node) {
+    if (!node || typeof node !== "object") return "";
+    const cmd = node.continuationCommand;
+    if (cmd && typeof cmd.token === "string" && cmd.token) return cmd.token;
+    const next = node.nextContinuationData;
+    if (next && typeof next.continuation === "string" && next.continuation) {
+      return next.continuation;
+    }
+    const reload = node.reloadContinuationData;
+    if (reload && typeof reload.continuation === "string" && reload.continuation) {
+      return reload.continuation;
+    }
+    const endpoint = node.continuationEndpoint;
+    if (endpoint && typeof endpoint === "object") return tokenFromNode(endpoint);
+    return "";
+  }
+
+  // The token of the MAIN grid (richGridRenderer), not of any shelf inside it.
+  // The grid keeps its next-page token in continuations[] or as the LAST entry
+  // of its contents (the sentinel sits after the feed), so both are checked.
+  function tokenFromRichGrid(value) {
+    const queue = [value];
+    const seen = new Set();
+    let guard = 0;
+    while (queue.length && guard < 100000) {
+      guard += 1;
+      const node = queue.shift();
+      if (!node || typeof node !== "object" || seen.has(node)) continue;
+      seen.add(node);
+      const grid = node.richGridRenderer;
+      if (grid && typeof grid === "object") {
+        const continuations = grid.continuations;
+        if (Array.isArray(continuations)) {
+          for (const entry of continuations) {
+            const t = tokenFromNode(entry);
+            if (t) return t;
+          }
+        }
+        const contents = grid.contents;
+        if (Array.isArray(contents)) {
+          for (let i = contents.length - 1; i >= 0; i -= 1) {
+            const item = contents[i];
+            const holder = item && item.continuationItemRenderer;
+            const t = tokenFromNode(holder);
+            if (t) return t;
+          }
+        }
+        return "";
+      }
+      for (const child of Object.values(node)) {
+        if (child && typeof child === "object") queue.push(child);
+      }
+    }
+    return "";
+  }
+
+  // Fallback deep search that prefers the LAST token found. In a browse
+  // response the feed's sentinel sits after the shelves, so "last" usually
+  // means "the grid", whereas a naive first-match returns a shelf's "more".
+  function lastContinuationToken(value) {
+    let found = "";
     const queue = [value];
     const seen = new Set();
     let guard = 0;
@@ -1770,14 +1885,36 @@
       const node = queue.shift();
       if (!node || typeof node !== "object" || seen.has(node)) continue;
       seen.add(node);
-      if (node.continuationCommand && typeof node.continuationCommand.token === "string") {
-        return node.continuationCommand.token;
-      }
+      const t = tokenFromNode(node);
+      if (t) found = t;
       for (const child of Object.values(node)) {
         if (child && typeof child === "object") queue.push(child);
       }
     }
-    return "";
+    return found;
+  }
+
+  function firstContinuationToken(value) {
+    // A continuation response carries the next token on the ACTION, not inside
+    // a row: onResponseReceivedActions[].appendContinuationItemsAction.
+    // continuation. Prefer it -- it belongs to the feed, never to a shelf.
+    const actions = value && value.onResponseReceivedActions;
+    if (Array.isArray(actions)) {
+      for (const action of actions) {
+        const append = action && action.appendContinuationItemsAction;
+        if (append && typeof append.continuation === "string" && append.continuation) {
+          return append.continuation;
+        }
+      }
+    }
+    // A browse response: the main grid's own token. The old deep walk returned
+    // the FIRST continuationCommand anywhere, which on a multi-shelf page is
+    // usually a music or Shorts shelf, so the chain walked THAT shelf and the
+    // feed "added once, then stopped". Walking the grid keeps the refill on
+    // the real home feed.
+    const gridToken = tokenFromRichGrid(value);
+    if (gridToken) return gridToken;
+    return lastContinuationToken(value);
   }
 
   // Builds a card by cloning a real one, so it matches the feed exactly.
@@ -1970,6 +2107,7 @@
     refillProbe.matchedTemplate = false;
     refillProbe.reachedAppend = false;
     refillProbe.noContainer = "";
+    diag.refillChainReset = false;
     seedRefillVideoIds();
     const known = refillState.videoIds.size;
 
@@ -1977,6 +2115,7 @@
       let added = 0;
       refillState.batches = 0;
       let token = refillState.nextToken || "";
+      let chainEnded = false;
       for (let batch = 0; batch < REFILL.maxBatches; batch += 1) {
         const { videos, token: nextToken } = await requestFreshFeedVideos(config, token);
         refillState.batches += 1;
@@ -1989,12 +2128,24 @@
         }
         // Advance the chain even when this batch was all repeats: the next
         // trigger continues deeper instead of re-serving the same first page.
-        const advanced = nextToken && nextToken !== token;
+        const advanced = Boolean(nextToken) && nextToken !== token;
         token = nextToken || "";
         refillState.nextToken = token;
-        if (!advanced || !token) break;
+        if (!advanced || !token) {
+          // The chain is over, or YouTube echoed the same token back. Either
+          // way there is nothing deeper to walk, so mark it: the next trigger
+          // must start with a FRESH browse (a new recommendation mix) instead
+          // of replaying this dead page. Replaying it is exactly what made the
+          // refill "added once, then stopped".
+          chainEnded = true;
+          break;
+        }
         if (!fresh.length) break;
         if (added === 0) break;
+      }
+      if (chainEnded) {
+        refillState.nextToken = "";
+        diag.refillChainReset = true;
       }
       refillState.added += added;
       diag.refillAdded = (diag.refillAdded || 0) + added;
@@ -2270,6 +2421,22 @@
     }, wait);
   }
 
+  // True when YouTube itself could append the next feed page: a continuation
+  // element exists, or the grid (or its api) exposes a zero-argument method
+  // that loads more. On builds where neither exists the feed is server-rendered
+  // and will never grow on its own; see pressFeedReloadButton.
+  function pageHasContinuationPath() {
+    if (findFeedContinuation()) return true;
+    const { grid, api } = probeContinuationApi();
+    for (const holder of [api, grid]) {
+      if (!holder) continue;
+      for (const name of CONTINUATION_CANDIDATES) {
+        if (typeof holder[name] === "function" && holder[name].length === 0) return true;
+      }
+    }
+    return false;
+  }
+
   function pressFeedReloadButton() {
     if (!endlessFeedEnabled() || refillState.running) return;
     if (endlessPresses >= ENDLESS.maxPresses) return;
@@ -2278,6 +2445,21 @@
     diag.exhausted = feedIsExhausted();
     if (!diag.exhausted) return;
     snapshotPage();
+
+    // Dead page: no continuation node and no callable grid/api method, so
+    // YouTube cannot append cards by itself and every "more" button in the DOM
+    // is a shelf decoy. Pressing one just burns ENDLESS.settleMs (~8s), plus
+    // the cooldown before it -- that is the multi-second delay the user sees
+    // between reaching the end and cards appearing. Refill directly: InnerTube
+    // is the only mechanism that grows this feed, and it starts in about a
+    // second. A live continuation path still tries the button first, because
+    // on a healthy build the button is the better path.
+    if (!pageHasContinuationPath()) {
+      diag.refillDirect = true;
+      note("endless:refill-direct");
+      refillHomeFeed();
+      return;
+    }
 
     // YouTube renders no control at the end of the home feed on this build, and
     // the only "more" buttons on the page belong to shelves. So the feed is

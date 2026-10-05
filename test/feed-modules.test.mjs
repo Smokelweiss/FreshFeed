@@ -338,8 +338,11 @@ check('thin buffer but still loading: not exhausted', M.feedIsExhausted() === fa
 
 console.log('\n=== ENDLESS: uses YouTube own button, never a reload ===')
 
-// The button is found and pressed.
+// The button is found and pressed. The grid exposes a callable continuation
+// method (a "live" build), so the press path -- not the refill-direct path --
+// is what should run.
 resetWorld({ scrollHeight: 1000, scrollTop: 0, sentinel: null })
+gridEl.api = fakeApi()
 const more = makeButton('Ещё')
 world.buttons = [more]
 scopeRoots = [makeScope('ytd-continuation-item-renderer')]
@@ -354,6 +357,7 @@ check('page was NEVER reloaded', world.reloaded === 0, 'reloads=' + (world.reloa
 
 // Cards arriving after the press is treated as success and the loop continues.
 resetWorld({ scrollHeight: 1000, scrollTop: 0, sentinel: null })
+gridEl.api = fakeApi()
 const more2 = makeButton('Show more', { aria: 'Show more' })
 world.buttons = [more2]
 scopeRoots = [makeScope('ytd-continuation-item-renderer')]
@@ -412,6 +416,7 @@ check('no press while watching a video', world.clicks === 0, 'clicks=' + world.c
 
 // Repeated presses that deliver nothing must stop.
 resetWorld({ scrollHeight: 1000, scrollTop: 0, sentinel: null })
+gridEl.api = fakeApi()
 const loopBtn = makeButton('Ещё')
 world.buttons = [loopBtn]
 scopeRoots = [makeScope('ytd-continuation-item-renderer')]
@@ -819,6 +824,84 @@ const srcsetCard = M.buildCardFromTemplate(makeRealCard(), extracted[0])
 check('rewrites srcset so the cloned card shows the new thumbnail',
   srcsetCard.querySelector('img')._attrs.srcset === 'https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg',
   'srcset=' + srcsetCard.querySelector('img')._attrs.srcset)
+
+// -------------------------------------------------- refill: bug of 1.23.0
+// The browse response's FIRST continuation token belonged to a shelf (mostly a
+// music mix), so the refill walked that shelf: added music once, then the
+// shelf chain ended and nothing more was ever appended. The grid's own token
+// must win, and shelf subtrees must not be extracted as feed cards.
+const shelfResponse = {
+  contents: {
+    twoColumnBrowseResultsRenderer: {
+      tabs: [{
+        tabRenderer: {
+          content: {
+            richGridRenderer: {
+              contents: [
+                { richItemRenderer: { content: { lockupViewModel: {
+                  video_id: 'fffffffffff',
+                  metadata: { lockupMetadataViewModel: { title: { content: 'Feed video' } } }
+                } } } },
+                { richShelfRenderer: {
+                  title: 'Music',
+                  content: { horizontalListRenderer: { items: [
+                    { richItemRenderer: { content: { lockupViewModel: {
+                      video_id: 'ggggggggggg',
+                      metadata: { lockupMetadataViewModel: { title: { content: 'Shelf music' } } }
+                    } } } }
+                  ] } }
+                } },
+                { richItemRenderer: { content: { lockupViewModel: {
+                  video_id: 'hhhhhhhhhhh',
+                  metadata: { lockupMetadataViewModel: { title: { content: 'Feed video two' } } }
+                } } } },
+                { continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: 'GRIDTOKEN' } } } }
+              ]
+            }
+          }
+        }
+      }]
+    }
+  }
+}
+const shelfVideos = M.extractVideos(shelfResponse)
+check('skips music-shelf subtrees (the "mostly music" bug)',
+  shelfVideos.length === 2 && shelfVideos.every((v) => v.id !== 'ggggggggggg'),
+  'ids=' + shelfVideos.map((v) => v.id).join(','))
+check('grid token wins over a shelf token in a browse response',
+  M.firstContinuationToken(shelfResponse) === 'GRIDTOKEN',
+  'token=' + M.firstContinuationToken(shelfResponse))
+
+// A continuation response carries the next token on the ACTION, not inside a
+// row. The old flat search could pick a row-level token (or a shelf's); the
+// action-level continuation is the main feed's and must win.
+const continuationResponse = {
+  onResponseReceivedActions: [{
+    appendContinuationItemsAction: {
+      continuation: 'ACTION_TOKEN',
+      continuationItems: [
+        { richItemRenderer: { content: { lockupViewModel: { video_id: 'iiiiiiiiiii' } } } },
+        { continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: 'ROW_TOKEN' } } } }
+      ]
+    }
+  }]
+}
+check('prefers the action-level continuation token on a continuation response',
+  M.firstContinuationToken(continuationResponse) === 'ACTION_TOKEN',
+  'token=' + M.firstContinuationToken(continuationResponse))
+
+// Dead page: no sentinel, no grid.api, but a decoy "Ещё" button exists. On
+// this build the button is a shelf decoy, so pressing it would burn ~8s and
+// deliver nothing -- that is the multi-second delay the user saw. The module
+// must skip the press and refill directly.
+resetWorld({ scrollHeight: 1000, scrollTop: 0, sentinel: null })
+gridEl.api = undefined
+const decoyBtn = makeButton('Ещё')
+world.buttons = [decoyBtn]
+scopeRoots = [makeScope('ytd-continuation-item-renderer')]
+M.pressFeedReloadButton()
+check('dead page: decoy button is never clicked', world.clicks === 0, 'clicks=' + world.clicks)
+check('dead page: refill-direct is flagged', M.diag.refillDirect === true)
 
 console.log('\n=== ' + pass + ' passed, ' + fail + ' failed ===')
 process.exit(fail ? 1 : 0)

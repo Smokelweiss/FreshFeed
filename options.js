@@ -325,6 +325,9 @@
     lines.push("Smooth scroll");
     lines.push("  loop ticks         : " + d.ticks);
     lines.push("  rounds run         : " + d.rounds);
+    lines.push("  lookahead active   : " + yes(d.lookaheadOn));
+    lines.push("  setting (smooth)   : " + yes(d.lookaheadSetting) + (d.lookaheadGate ? "   \u2190 " + d.lookaheadGate : ""));
+    lines.push("  setting (endless)  : " + yes(d.endlessSetting) + "   master enabled: " + yes(d.enabledSetting));
     lines.push("  requests issued    : " + ((d.requests || []).join(", ") || "none"));
     lines.push("  times feed grew    : " + d.growthSeen);
     lines.push("  dead rounds        : " + d.deadRounds);
@@ -339,12 +342,14 @@
     cands.forEach((c) => lines.push("      " + c));
     lines.push("  presses            : " + d.presses);
     lines.push("  presses that grew  : " + d.pressesThatGrew);
+    lines.push("  refilled directly  : " + yes(d.refillDirect));
     lines.push("");
     lines.push("Feed refill (clones a real card, uses InnerTube)");
     lines.push("  running now        : " + yes(d.refillRunning));
     lines.push("  cards added        : " + (d.refillAdded || 0));
     lines.push("  batches requested  : " + (d.refillBatches || 0));
     lines.push("  saved continuation : " + yes(d.refillTokenChain));
+    lines.push("  chain reset on stall: " + yes(d.refillChainReset));
     lines.push("  last error         : " + (d.refillError || "none"));
     const p = d.refillProbe;
     if (p && (p.keys.length || p.status)) {
