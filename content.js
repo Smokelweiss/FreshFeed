@@ -513,7 +513,14 @@
   }
 
   function firstVideoHref(card) {
-    const link = card.querySelector("a#video-title-link, a#thumbnail");
+    // Several anchor shapes have shipped over the years, in overlapping combos:
+    // id="video-title-link", id="thumbnail", and the lockup-view-model markers.
+    // Any anchor pointing at /watch is proof the card is a video; trying the
+    // known ids first, then falling back to any /watch anchor, keeps this
+    // working when YouTube renames the next one.
+    const link = card.querySelector(
+      "a#video-title-link, a#thumbnail, a.yt-lockup-view-model__content-image, a#video-title, a[href*='/watch?v=']"
+    );
     return link ? link.href || link.getAttribute("href") || "" : "";
   }
 
@@ -1568,6 +1575,17 @@
     error: ""
   };
 
+  // What the last InnerTube responses actually contained, so a refill that adds
+  // nothing reports why instead of failing quietly.
+  const refillProbe = {
+    idKinds: { videoId: 0, video_id: 0, contentId: 0 },
+    responseStatus: 0,
+    responseKeys: [],
+    firstContentTag: "",
+    pageHasWatchAnchors: false,
+    matchedTemplate: false
+  };
+
   // Video ids already in the grid, so a refill never repeats what the user has
   // already scrolled past.
   function seedRefillVideoIds() {
@@ -1585,6 +1603,7 @@
   // a Shorts lockup, since those have very different internal structure.
   function findRefillTemplate() {
     if (refillState.templateCard && refillState.templateCard.isConnected) {
+      refillProbe.matchedTemplate = true;
       return refillState.templateCard;
     }
     const grid = document.querySelector("ytd-rich-grid-renderer #contents, #contents");
@@ -1594,26 +1613,49 @@
         const href = firstVideoHref(card);
         return Boolean(href) && href.includes("/watch?v=");
       });
+    refillProbe.matchedTemplate = candidates.length > 0;
     refillState.templateCard = candidates[0] || null;
     return refillState.templateCard;
   }
 
   // Pulls every video out of one browse/continuation response.
+  //
+  // YouTube has shipped several id shapes for the same thing, and the page that
+  // reports "no videos" is usually the one where the shape changed again. The
+  // RSSHub 503 report ("LockupView format") is the same failure from a different
+  // angle: items started carrying video_id / content_id instead of videoId. So
+  // all three shapes are accepted, and the diagnostics record which ones were
+  // actually present so a miss is visible instead of silent.
   function extractVideos(data) {
     const out = [];
     const seen = new Set();
+    const counts = refillProbe.idKinds;
     const queue = [data];
     let guard = 0;
     while (queue.length && guard < 200000) {
       guard += 1;
       const node = queue.shift();
       if (!node || typeof node !== "object") continue;
-      const id = typeof node.videoId === "string" ? node.videoId : "";
+      const flat = node.videoId || node.video_id || "";
+      let id = typeof flat === "string" ? flat : "";
+      if (typeof node.videoId === "string") counts.videoId += 1;
+      if (typeof node.video_id === "string") counts.video_id += 1;
+      if (node.contentId) {
+        if (typeof node.contentId === "string") {
+          counts.contentId += 1;
+          if (!id) id = node.contentId;
+        } else if (typeof node.contentId.videoId === "string") {
+          counts.contentId += 1;
+          if (!id) id = node.contentId.videoId;
+        }
+      }
       if (id && /^[A-Za-z0-9_-]{11}$/.test(id) && !seen.has(id)) {
         seen.add(id);
         out.push({
           id,
-          title: runsText(node.title) || runsText(node.headline),
+          title: runsText(node.title) ||
+            runsText(node.headline) ||
+            runsText(node.metadata),
           byline: runsText(node.ownerText) ||
             runsText(node.shortBylineText) ||
             runsText(node.longBylineText) ||
@@ -1636,10 +1678,36 @@
     if (typeof value === "string") return value;
     if (typeof value.simpleText === "string") return value.simpleText;
     if (Array.isArray(value.runs)) return value.runs.map((r) => r.text || "").join("");
+    if (typeof value.content === "string") return value.content;
+    if (value.lockupMetadataViewModel) {
+      return runsText(value.lockupMetadataViewModel.title) ||
+        runsText(value.lockupMetadataViewModel.subtitle);
+    }
     return "";
   }
 
   function pickThumbnail(node) {
+    // LockupView ships the picture as contentImage.image.sources with explicit
+    // width/height, while the older format uses thumbnail.thumbnails. Prefer the
+    // source with the largest declared width, bounded to a sane cap so a feed is
+    // not asked to decode a wall of 16k frames.
+    const lockupSources = node.contentImage && node.contentImage.image && node.contentImage.image.sources;
+    if (Array.isArray(lockupSources) && lockupSources.length) {
+      let best = null;
+      let bestWidth = 0;
+      for (const source of lockupSources) {
+        if (!source || typeof source.url !== "string") continue;
+        const width = Number(source.width) || 0;
+        if (width > bestWidth && width <= 1280) {
+          best = source.url;
+          bestWidth = width;
+        }
+      }
+      if (bestWidth === 0 && lockupSources[0] && lockupSources[0].url) {
+        return lockupSources[0].url;
+      }
+      return best || "";
+    }
     const thumbs = node.thumbnail && node.thumbnail.thumbnails;
     if (!Array.isArray(thumbs)) return "";
     const sizes = ["maxresdefault", "sddefault", "hqdefault", "mqdefault", "default"];
@@ -1723,8 +1791,20 @@
 
   function appendRefilledVideos(videos) {
     const grid = document.querySelector("ytd-rich-grid-renderer #contents, #contents");
+    refillProbe.pageHasWatchAnchors = Boolean(
+      grid && grid.querySelector('a[href*="/watch?v="]')
+    );
+    refillProbe.reachedAppend = true;
+    if (!grid) {
+      refillProbe.noContainer = "no ytd-rich-grid-renderer #contents";
+      return 0;
+    }
     const template = findRefillTemplate();
-    if (!grid || !template) return 0;
+    refillProbe.matchedTemplate = Boolean(template);
+    if (!template) {
+      refillProbe.noContainer = "no template card";
+      return 0;
+    }
     let added = 0;
     for (const video of videos) {
       if (!video.id || refillState.videoIds.has(video.id)) continue;
@@ -1755,12 +1835,21 @@
       { method: "POST", credentials: "include", headers, body: JSON.stringify(body) },
       REFILL.requestTimeoutMs
     );
+    refillProbe.responseStatus = response.status;
     if (!response.ok) throw new Error("feed request failed with " + response.status);
-    return response.json();
+    const parsed = await response.json();
+    if (!refillProbe.responseKeys.length) {
+      refillProbe.responseKeys = Array.isArray(parsed)
+        ? ["<array>"]
+        : Object.keys(parsed).slice(0, 12);
+    }
+    return parsed;
   }
 
   // Requests one fresh home batch and follows its continuation chain a few times.
   async function requestFreshFeedVideos(config) {
+    refillProbe.idKinds = { videoId: 0, video_id: 0, contentId: 0 };
+    refillProbe.responseKeys = [];
     const client = { clientName: "WEB", clientVersion: config.clientVersion };
     if (config.visitorData) client.visitorData = config.visitorData;
     let data = await innertubeRequest(config, {
@@ -1798,6 +1887,13 @@
 
     refillState.running = true;
     diag.refillRunning = true;
+    refillProbe.idKinds = { videoId: 0, video_id: 0, contentId: 0 };
+    refillProbe.responseStatus = 0;
+    refillProbe.responseKeys = [];
+    refillProbe.pageHasWatchAnchors = false;
+    refillProbe.matchedTemplate = false;
+    refillProbe.reachedAppend = false;
+    refillProbe.noContainer = "";
     seedRefillVideoIds();
     const known = refillState.videoIds.size;
 
@@ -1827,6 +1923,19 @@
     } finally {
       refillState.running = false;
       diag.refillRunning = false;
+      // Make the last refill's internals visible: response status and keys,
+      // which id shapes the response carried, whether the page had /watch
+      // anchors, and whether a template card matched. A refill that adds 0 must
+      // say why, and this is the only place that can.
+      diag.refillProbe = {
+        status: refillProbe.responseStatus,
+        keys: refillProbe.responseKeys,
+        ids: refillProbe.idKinds,
+        reachedAppend: refillProbe.reachedAppend,
+        hasAnchors: refillProbe.pageHasWatchAnchors,
+        template: refillProbe.matchedTemplate,
+        why: refillProbe.noContainer || ""
+      };
       flushDiag(true);
     }
 

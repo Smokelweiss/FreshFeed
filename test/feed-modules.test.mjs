@@ -662,6 +662,89 @@ check('marks the card as refilled', built._attrs['data-ff-refilled'] === '1')
 check('never leaves a Shorts link pointing at the old video',
   built.querySelectorAll('a[href]').every((a) => a._attrs.href !== '/shorts/abcdefghijk'))
 
+// ---------------------------------------------------------- refill: lockup
+
+// YouTube migrated the browse response to the LockupView format, where items
+// carry video_id / content_id instead of videoId and metadata uses a nested
+// lockupMetadataViewModel. This is the shape that made RSSHub's feed return 503.
+const lockupResponse = {
+  contents: {
+    twoColumnBrowseResultsRenderer: {
+      tabs: [{
+        tabRenderer: {
+          content: {
+            richGridRenderer: {
+              contents: [
+                { richItemRenderer: { content: { lockupViewModel: {
+                  video_id: 'dQw4w9WgXcQ',
+                  metadata: { lockupMetadataViewModel: {
+                    title: { content: 'Lockup first' }
+                  } },
+                  contentImage: { image: { sources: [
+                    { url: 'https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg', width: 320 },
+                    { url: 'https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg', width: 480 }
+                  ] } }
+                } } } },
+                { richItemRenderer: { content: { lockupViewModel: {
+                  contentId: { videoId: '9bZkp7q19f0' },
+                  metadata: { lockupMetadataViewModel: {
+                    title: { content: 'Lockup second' }
+                  } },
+                  contentImage: { image: { sources: [
+                    { url: 'https://i.ytimg.com/vi/9bZkp7q19f0/hqdefault.jpg', width: 1280 }
+                  ] } }
+                } } } },
+                { continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: 'TOKEN456' } } } }
+              ]
+            }
+          }
+        }
+      }]
+    }
+  }
+}
+
+const lockupVideos = M.extractVideos(lockupResponse)
+check('extracts videos from the LockupView format', lockupVideos.length === 2,
+  'found=' + lockupVideos.length + ' ids=' + lockupVideos.map((v) => v.id).join(','))
+check('reads a lockupMetadataViewModel title', lockupVideos[0] && lockupVideos[0].title === 'Lockup first',
+  'title=' + (lockupVideos[0] || {}).title)
+check('reads contentId.videoId lockups', lockupVideos[1] && lockupVideos[1].id === '9bZkp7q19f0',
+  'id=' + (lockupVideos[1] || {}).id)
+check('picks the largest lockup source', lockupVideos[1] && /hqdefault/.test(lockupVideos[1].thumbnail),
+  'thumb=' + (lockupVideos[1] || {}).thumbnail)
+check('finds the continuation token in a lockup response',
+  M.firstContinuationToken(lockupResponse) === 'TOKEN456',
+  'token=' + M.firstContinuationToken(lockupResponse))
+
+// The template picker must accept a card whose only /watch anchor is the
+// modern lockup class, without the legacy title-link / thumbnail ids.
+function makeLockupCard() {
+  const card = makeEl('ytd-rich-item-renderer')
+  const modernA = makeEl('a', { innerText: 'Modern title' })
+  modernA._attrs.href = '/watch?v=modernmodernmod'
+  modernA._attrs.class = 'yt-lockup-view-model__content-image'
+  card._children.push(modernA)
+  card.querySelectorAll = (sel) => {
+    if (/a\[href\]/.test(sel)) return [modernA]
+    if (/video-title|thumbnail/.test(sel)) return []
+    if (/content-image/.test(sel)) return [modernA]
+    return []
+  }
+  card.querySelector = (sel) => card.querySelectorAll(sel)[0] || null
+  card.cloneNode = () => {
+    const copy = makeLockupCard()
+    copy._attrs = { ...card._attrs }
+    return copy
+  }
+  return card
+}
+const lockupCard = M.buildCardFromTemplate(makeLockupCard(), lockupVideos[0])
+check('a modern-lockup template card is cloned', Boolean(lockupCard))
+check('the modern lockup anchor is pointed at the new video',
+  lockupCard.querySelector('a[href]')._attrs.href === '/watch?v=dQw4w9WgXcQ',
+  'href=' + lockupCard.querySelector('a[href]')._attrs.href)
+
 console.log('\n=== ' + pass + ' passed, ' + fail + ' failed ===')
 process.exit(fail ? 1 : 0)
 

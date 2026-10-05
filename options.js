@@ -345,6 +345,15 @@
     lines.push("  cards added        : " + (d.refillAdded || 0));
     lines.push("  batches requested  : " + (d.refillBatches || 0));
     lines.push("  last error         : " + (d.refillError || "none"));
+    const p = d.refillProbe;
+    if (p && (p.keys.length || p.status)) {
+      lines.push("  response status    : " + (p.status || 0));
+      lines.push("  top-level keys     : " + (p.keys.length ? p.keys.join(", ") : "(none)"));
+      lines.push("  videoId / video_id / contentId: " + p.ids.videoId + " / " + p.ids.video_id + " / " + p.ids.contentId);
+      lines.push("  reached append     : " + yes(p.reachedAppend));
+      lines.push("  page has /watch anchors: " + yes(p.hasAnchors) + "  template matched: " + yes(p.template));
+      if (p.why) lines.push("  why nothing added  : " + p.why);
+    }
     lines.push("");
     lines.push("Subscription sync");
     lines.push("  channels           : " + d.syncChannels);

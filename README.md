@@ -83,12 +83,21 @@ InnerTube calls is its entire purpose. With the header, a `FEwhat_to_watch`
 browse returns 25 videos plus a continuation token; without it, an empty shell
 with no videos and no token.
 
-Why the endless feed does not append cards even so: the data is obtainable, but
-rendering is not. Hand-built `<ytd-rich-item-renderer>` elements are re-rendered
-by Polymer's own template and come out blank, and the grid's own append handler
-is minified and routes through a command-keyed action map that silently ignores a
-raw parsed response. Depending on minified internals would break without warning,
-so the feed recovers by refilling instead.
+Why the endless feed clones a real card instead of building markup: on the
+user's actual Firefox the grid exposes no data model (`grid.data` is absent and
+the only methods on the element are the four base DOM ones), and the last
+children of the grid are plain `ytd-rich-item-renderer` nodes. Polymer is not
+hydrating the feed, so there is nothing to append into — and likewise nothing
+that could re-render a hand-written element away. Cards are therefore built by
+deep-cloning a card already on the page and rewriting its links, title,
+thumbnail and byline. That matches the surrounding feed exactly and needs no
+guesswork about markup.
+
+The refill also tolerates YouTube's response shape changes. Items have shipped
+with `videoId`, `video_id` and `contentId.videoId` over time (the LockupView
+format), and thumbnails land in either `thumbnail.thumbnails` or
+`contentImage.image.sources` — all are handled, and Diagnostics records which
+shapes the last response actually used so a silent miss stays visible.
 
 
 ## Quick start
