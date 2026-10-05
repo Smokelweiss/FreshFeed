@@ -1154,6 +1154,11 @@
     refillBatches: 0,
     refillRunning: false,
     refillError: "",
+    // True while a continuation token from the previous refill is saved. A
+    // saved token means the next refill walks deeper into the chain instead
+    // of replaying the top of the feed (the "loaded once, then stopped"
+    // symptom when this is unreachable).
+    refillTokenChain: false,
     syncChannels: 0,
     syncPartial: false,
     syncSkippedPages: 0
@@ -1281,6 +1286,7 @@
       ? String(button.getAttribute("aria-label") || button.innerText || "").replace(/\s+/g, " ").trim().slice(0, 40)
       : "";
     diag.reloadCandidates = (found.candidates || []).slice(0, 12);
+    diag.refillTokenChain = Boolean(refillState.nextToken);
     diagDirty = true;
   }
 
@@ -1447,6 +1453,18 @@
 
     if (!requestMoreFromYouTube()) {
       // Nothing to trigger: no continuation element and no callable method.
+      // On a page where the feed is server-rendered and Polymer never hydrates
+      // the grid, there is nothing YouTube itself can do to append more cards.
+      // The refill is the only mechanism that grows the feed, so hand the work
+      // to it instead of banking a dead round that can never succeed.
+      //
+      // fromLookahead relaxes the buffer threshold (targetScreens rather than
+      // the exhausted-only threshold) and skips the endless-toggle gate, so
+      // smooth scroll really does keep the buffer full while the user reads.
+      if (!refillState.running) {
+        note("refill:lookahead");
+        refillHomeFeed({ fromLookahead: true });
+      }
       lookaheadDeadRounds += 1;
       armLookaheadTimer();
       flushDiag();
@@ -1526,9 +1544,10 @@
   // without depending on a data model that is not there.
   const REFILL = {
     // How many fresh batches to request per refill.
-    maxBatches: 3,
-    // Stop a batch chain after this many continuation hops.
-    maxHops: 8,
+    maxBatches: 2,
+    // After a refill that added nothing, wait this long before trying again.
+    // The feed may simply be over; hammering InnerTube helps no one.
+    emptyCooldownMs: 15000,
     requestTimeoutMs: 12000,
     settleQuietMs: 3000
   };
@@ -1572,7 +1591,19 @@
     running: false,
     added: 0,
     batches: 0,
-    error: ""
+    error: "",
+    // The continuation token of the LAST batch we consumed. Remembering it is
+    // what lets a refill keep going on the next exhaustion instead of replaying
+    // the same first page: without it, every refill asked for FEwhat_to_watch
+    // from scratch, YouTube returned the same top videos, and they were all
+    // already in videoIds, so nothing was ever added twice.
+    nextToken: "",
+    // How long to wait after a refill that added nothing before trying again.
+    // Prevents hammering InnerTube when the feed is genuinely at its end.
+    lastEmptyAt: 0,
+    // When the last refill actually started, so repeated lookahead ticks cannot
+    // fire a new InnerTube chain every 900ms.
+    lastRunAt: 0
   };
 
   // What the last InnerTube responses actually contained, so a refill that adds
@@ -1663,7 +1694,11 @@
           channelId: (node.ownerText && node.ownerText.navigationEndpoint &&
             node.ownerText.navigationEndpoint.browseEndpoint &&
             node.ownerText.navigationEndpoint.browseEndpoint.browseId) || "",
-          thumbnail: pickThumbnail(node)
+          // Every refilled card must show its own thumbnail. If the response
+          // carries none in a shape we know, fall back to YouTube's own
+          // i.ytimg.com url for this id, which always exists.
+          thumbnail: pickThumbnail(node) ||
+            ("https://i.ytimg.com/vi/" + id + "/hqdefault.jpg")
         });
       }
       for (const value of Object.values(node)) {
@@ -1687,11 +1722,19 @@
   }
 
   function pickThumbnail(node) {
-    // LockupView ships the picture as contentImage.image.sources with explicit
-    // width/height, while the older format uses thumbnail.thumbnails. Prefer the
-    // source with the largest declared width, bounded to a sane cap so a feed is
-    // not asked to decode a wall of 16k frames.
-    const lockupSources = node.contentImage && node.contentImage.image && node.contentImage.image.sources;
+    // LockupView nests the picture differently across YouTube builds:
+    //   contentImage.contentImageViewModel.image.sources    (modern)
+    //   contentImage.image.sources                          (earlier)
+    // while the older formats use thumbnail.thumbnails. All shapes are
+    // accepted; the source with the largest declared width wins, bounded to a
+    // sane cap so a feed is not asked to decode a wall of 16k frames.
+    const image =
+      (node.contentImage &&
+        ((node.contentImage.contentImageViewModel &&
+          node.contentImage.contentImageViewModel.image) ||
+          node.contentImage.image)) ||
+      null;
+    const lockupSources = image && image.sources;
     if (Array.isArray(lockupSources) && lockupSources.length) {
       let best = null;
       let bestWidth = 0;
@@ -1775,10 +1818,17 @@
     }
 
     // Swap the thumbnail image. The card may have several sizes; the last one is
-    // normally the largest actually rendered.
+    // normally the largest actually rendered. A cloned card keeps its original
+    // srcset (used on retina), so both src and srcset are rewritten to the new
+    // picture, and stale sourceset candidates are dropped to force a repaint.
     const images = card.querySelectorAll("img");
     if (images.length && video.thumbnail) {
-      images.forEach((img) => img.setAttribute("src", video.thumbnail));
+      images.forEach((img) => {
+        img.setAttribute("src", video.thumbnail);
+        img.setAttribute("srcset", video.thumbnail);
+        const lazy = img.getAttribute("loading");
+        if (!lazy || lazy === "lazy") img.setAttribute("loading", "eager");
+      });
     }
 
     const byline = card.querySelector("#byline, .yt-content-metadata-view-model__metadata-text");
@@ -1846,38 +1896,63 @@
     return parsed;
   }
 
-  // Requests one fresh home batch and follows its continuation chain a few times.
-  async function requestFreshFeedVideos(config) {
+  // Requests one fresh home batch. Pass a continuation token to walk deeper
+  // into the same chain; pass none to start a new home browse.
+  //
+  // Returns { videos, token } where token is the next continuation to use. The
+  // caller owns storing it, so the next refill continues where this one ended
+  // instead of replaying the top of the feed (which is what silently capped the
+  // refill at one run before: every run asked for FEwhat_to_watch from scratch,
+  // got the same first video, and they were all already seen).
+  async function requestFreshFeedVideos(config, token) {
     refillProbe.idKinds = { videoId: 0, video_id: 0, contentId: 0 };
     refillProbe.responseKeys = [];
     const client = { clientName: "WEB", clientVersion: config.clientVersion };
     if (config.visitorData) client.visitorData = config.visitorData;
-    let data = await innertubeRequest(config, {
-      context: { client },
-      browseId: "FEwhat_to_watch"
-    });
-    const videos = extractVideos(data);
-    let token = firstContinuationToken(data);
-    let hops = 0;
-    while (token && hops < REFILL.maxHops) {
-      const next = await innertubeRequest(config, { context: { client }, continuation: token });
-      const more = extractVideos(next);
-      for (const video of more) {
-        if (!videos.some((v) => v.id === video.id)) videos.push(video);
+    let data;
+    try {
+      data = await innertubeRequest(config, token
+        ? { context: { client }, continuation: token }
+        : { context: { client }, browseId: "FEwhat_to_watch" });
+    } catch (error) {
+      // A stale continuation token (they expire) must not kill the refill: drop
+      // it and start from a fresh browse instead.
+      if (token) {
+        refillState.nextToken = "";
+        data = await innertubeRequest(config, {
+          context: { client },
+          browseId: "FEwhat_to_watch"
+        });
+      } else {
+        throw error;
       }
-      const nextToken = firstContinuationToken(next);
-      if (!nextToken || nextToken === token) break;
-      token = nextToken;
-      hops += 1;
     }
-    return videos;
+    return { videos: extractVideos(data), token: firstContinuationToken(data) };
   }
 
-  async function refillHomeFeed() {
+  async function refillHomeFeed({ fromLookahead = false } = {}) {
     if (refillState.running) return;
-    if (!endlessFeedEnabled()) return;
+    if (!state.enabled) return;
     if (location.pathname !== "/") return;
-    if (!feedIsExhausted()) return;
+    // The endless-feed toggle gates the button path; the lookahead path may
+    // refill on its own when the smooth-scroll toggle is on.
+    const minBufferScreens = fromLookahead
+      ? LOOKAHEAD.targetScreens
+      : ENDLESS.minBufferScreens;
+    if (feedBufferScreens() > minBufferScreens) return;
+    // A refill that added nothing recently should not immediately retry: the
+    // feed may be genuinely over, and hammering InnerTube helps no one.
+    if (refillState.lastEmptyAt &&
+        Date.now() - refillState.lastEmptyAt < REFILL.emptyCooldownMs) {
+      return;
+    }
+    // Minimum gap between refill runs, so the lookahead ticking every ~900ms
+    // cannot start a new InnerTube chain on every tick. The refill itself is
+    // fast, but a burst of chains would saturate the API for no benefit.
+    if (refillState.lastRunAt &&
+        Date.now() - refillState.lastRunAt < REFILL.settleQuietMs) {
+      return;
+    }
 
     const config = await innertubeConfigFor();
     if (!config) {
@@ -1886,6 +1961,7 @@
     }
 
     refillState.running = true;
+    refillState.lastRunAt = Date.now();
     diag.refillRunning = true;
     refillProbe.idKinds = { videoId: 0, video_id: 0, contentId: 0 };
     refillProbe.responseStatus = 0;
@@ -1900,12 +1976,24 @@
     try {
       let added = 0;
       refillState.batches = 0;
+      let token = refillState.nextToken || "";
       for (let batch = 0; batch < REFILL.maxBatches; batch += 1) {
-        const videos = await requestFreshFeedVideos(config);
+        const { videos, token: nextToken } = await requestFreshFeedVideos(config, token);
         refillState.batches += 1;
         const fresh = videos.filter((video) => !refillState.videoIds.has(video.id));
+        if (fresh.length) {
+          added += appendRefilledVideos(fresh);
+          // Cards appear as soon as the batch is parsed, not after the whole
+          // chain. The scan re-filters them; a status line reports progress.
+          if (homeActive) scheduleHomeScan();
+        }
+        // Advance the chain even when this batch was all repeats: the next
+        // trigger continues deeper instead of re-serving the same first page.
+        const advanced = nextToken && nextToken !== token;
+        token = nextToken || "";
+        refillState.nextToken = token;
+        if (!advanced || !token) break;
         if (!fresh.length) break;
-        added += appendRefilledVideos(fresh);
         if (added === 0) break;
       }
       refillState.added += added;
@@ -1913,13 +2001,15 @@
       diag.refillBatches = (diag.refillBatches || 0) + refillState.batches;
       diag.refillError = "";
       if (added > 0) {
-        // Let the filter process the new cards, then report.
-        if (homeActive) scheduleHomeScan();
+        refillState.lastEmptyAt = 0;
         showFeedStatus("Лента продолжена: +" + added);
+      } else {
+        refillState.lastEmptyAt = Date.now();
       }
     } catch (error) {
       refillState.error = (error && error.message) || String(error);
       diag.refillError = refillState.error;
+      refillState.lastEmptyAt = Date.now();
     } finally {
       refillState.running = false;
       diag.refillRunning = false;

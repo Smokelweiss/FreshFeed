@@ -745,6 +745,81 @@ check('the modern lockup anchor is pointed at the new video',
   lockupCard.querySelector('a[href]')._attrs.href === '/watch?v=dQw4w9WgXcQ',
   'href=' + lockupCard.querySelector('a[href]')._attrs.href)
 
+// -------------------------------------------------- refill: bugs of 1.22.0
+
+// Bug: every appended card showed the SAME thumbnail. The rebuild guarantees a
+// per-video picture: known shapes are picked, and when the response carries no
+// recognizable thumbnail at all the id is used to build an i.ytimg.com url.
+const thumblessResponse = {
+  contents: {
+    twoColumnBrowseResultsRenderer: {
+      tabs: [{
+        tabRenderer: {
+          content: {
+            richGridRenderer: {
+              contents: [
+                { richItemRenderer: { content: { lockupViewModel: {
+                  video_id: 'aaaaaaaaaaa',
+                  metadata: { lockupMetadataViewModel: { title: { content: 'No thumb' } } }
+                } } } },
+                { richItemRenderer: { content: { lockupViewModel: {
+                  video_id: 'bbbbbbbbbbb',
+                  metadata: { lockupMetadataViewModel: { title: { content: 'Also none' } } }
+                } } } }
+              ]
+            }
+          }
+        }
+      }]
+    }
+  }
+}
+const thumbless = M.extractVideos(thumblessResponse)
+check('falls back to an i.ytimg thumbnail built from the id',
+  thumbless.length === 2 &&
+    thumbless[0].thumbnail === 'https://i.ytimg.com/vi/aaaaaaaaaaa/hqdefault.jpg' &&
+    thumbless[1].thumbnail === 'https://i.ytimg.com/vi/bbbbbbbbbbb/hqdefault.jpg',
+  'thumbs=' + thumbless.map((v) => v.thumbnail).join(', '))
+
+// The real LockupView contentImage nests one level deeper than the fixture
+// above: contentImage.contentImageViewModel.image.sources. pickThumbnail must
+// read that shape too, otherwise every card keeps the clone's old picture.
+const nestedLockupResponse = {
+  contents: {
+    twoColumnBrowseResultsRenderer: {
+      tabs: [{
+        tabRenderer: {
+          content: {
+            richGridRenderer: {
+              contents: [
+                { richItemRenderer: { content: { lockupViewModel: {
+                  video_id: 'ccccccccccc',
+                  metadata: { lockupMetadataViewModel: { title: { content: 'Nested img' } } },
+                  contentImage: { contentImageViewModel: { image: { sources: [
+                    { url: 'https://i.ytimg.com/vi/ccccccccccc/hqdefault.jpg', width: 480 }
+                  ] } } }
+                } } } }
+              ]
+            }
+          }
+        }
+      }]
+    }
+  }
+}
+const nested = M.extractVideos(nestedLockupResponse)
+check('reads contentImageViewModel.image.sources thumbnails',
+  nested[0] && nested[0].thumbnail === 'https://i.ytimg.com/vi/ccccccccccc/hqdefault.jpg',
+  'thumb=' + (nested[0] || {}).thumbnail)
+
+// The clone's <img> keeps its original srcset (used by the browser on retina),
+// so the new src alone would be ignored and the old picture would stay on
+// screen. buildCardFromTemplate must rewrite srcset too.
+const srcsetCard = M.buildCardFromTemplate(makeRealCard(), extracted[0])
+check('rewrites srcset so the cloned card shows the new thumbnail',
+  srcsetCard.querySelector('img')._attrs.srcset === 'https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg',
+  'srcset=' + srcsetCard.querySelector('img')._attrs.srcset)
+
 console.log('\n=== ' + pass + ' passed, ' + fail + ' failed ===')
 process.exit(fail ? 1 : 0)
 

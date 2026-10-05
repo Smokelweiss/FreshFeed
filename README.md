@@ -95,9 +95,26 @@ guesswork about markup.
 
 The refill also tolerates YouTube's response shape changes. Items have shipped
 with `videoId`, `video_id` and `contentId.videoId` over time (the LockupView
-format), and thumbnails land in either `thumbnail.thumbnails` or
-`contentImage.image.sources` — all are handled, and Diagnostics records which
-shapes the last response actually used so a silent miss stays visible.
+format), and thumbnails land in either `thumbnail.thumbnails`,
+`contentImage.image.sources` or the nested
+`contentImage.contentImageViewModel.image.sources` — all are handled, and
+Diagnostics records which shapes the last response actually used so a silent
+miss stays visible.
+
+The refill is a **continuation chain**, not a one-shot page fetch. After the
+first run it saves the last continuation token, and the next refill walks
+deeper into that chain instead of replaying the top of the feed — otherwise
+every run would return the same first videos, find them all already on the
+page, and add nothing (the "loaded once, then stopped" regression). When a
+token expires or the chain runs out, the refill starts a fresh browse and
+backs off for a while instead of hammering InnerTube.
+
+Refills are also small and incremental: each run fetches at most two batches
+and appends cards as each one arrives, so the first pictures appear in
+about a second rather than after a long request chain. Smooth scroll and
+endless feed share the same refill: when there is no continuation element to
+nudge (a build where Polymer never hydrates the grid), smooth scroll hands the
+work to the refill so the buffer keeps filling as the user reads.
 
 
 ## Quick start

@@ -344,6 +344,7 @@
     lines.push("  running now        : " + yes(d.refillRunning));
     lines.push("  cards added        : " + (d.refillAdded || 0));
     lines.push("  batches requested  : " + (d.refillBatches || 0));
+    lines.push("  saved continuation : " + yes(d.refillTokenChain));
     lines.push("  last error         : " + (d.refillError || "none"));
     const p = d.refillProbe;
     if (p && (p.keys.length || p.status)) {
