@@ -1180,6 +1180,10 @@
     // True while the recommendation pool is exhausted and refills are backing
     // off until YouTube rotates it.
     refillPoolExhausted: false,
+    // True while a quiet rotation probe is scheduled: the pool ran dry and the
+    // extension will re-browse on its own after ~45s (no reload, no user
+    // action), so genuinely new recommendations keep the feed growing.
+    refillProbeArmed: false,
     syncChannels: 0,
     syncPartial: false,
     syncSkippedPages: 0
@@ -1302,6 +1306,35 @@
     );
     probeContinuationApi();
     probeFeedTail();
+    // The card the refill would clone, described live: its element shapes, the
+    // element the byline selector hits, and the captured channel. Rendered in
+    // every report regardless of whether a refill ran, so a byline rewrite
+    // miss can be pinned to the actual layout on the page.
+    diag.templateCardProbe = (() => {
+      const grid = document.querySelector("ytd-rich-grid-renderer #contents, #contents");
+      if (!grid) return null;
+      const card = Array.from(grid.querySelectorAll("ytd-rich-item-renderer"))
+        .find((c) => {
+          const href = firstVideoHref(c);
+          return Boolean(href) && href.includes("/watch?v=");
+        });
+      if (!card) return { card: "none" };
+      const cls = typeof card.className === "string" && card.className
+        ? "." + String(card.className).trim().split(/\s+/).slice(0, 2).join(".")
+        : "";
+      const bylineEl = card.querySelector(BYLINE_SELECTOR);
+      return {
+        card: card.tagName.toLowerCase() + cls,
+        channel: captureTemplateChannel(card),
+        byline: bylineEl
+          ? bylineEl.tagName.toLowerCase() +
+            (typeof bylineEl.className === "string" && bylineEl.className
+              ? "." + String(bylineEl.className).trim().split(/\s+/)[0] : "") +
+            ': "' + String(bylineEl.textContent || "").trim().slice(0, 24) + '"'
+          : "none",
+        dom: cardDomSummary(card)
+      };
+    })();
     const button = findFeedReloadButton();
     diag.reloadButton = button
       ? String(button.getAttribute("aria-label") || button.innerText || "").replace(/\s+/g, " ").trim().slice(0, 40)
@@ -1583,15 +1616,39 @@
   // names and styling to the surrounding feed, without guessing at markup and
   // without depending on a data model that is not there.
   const REFILL = {
-    // How many fresh batches to request per refill.
-    maxBatches: 3,
+    // How many fresh batches to request per refill. 3 batches could only
+    // trickle a few cards per scroll, because the FIRST page of the pool is
+    // almost entirely "already seen" once refillSeen is warm; the deeper
+    // pages of a live chain hold the genuinely new recommendations, so a
+    // refill walks up to this many pages instead of stopping at the first
+    // all-seen one.
+    maxBatches: 12,
+    // How many batches a quiet rotation probe walks. When the pool just ran
+    // dry, a full 12-page walk every probe would hammer InnerTube for a
+    // mostly-seen pool; 2 pages are enough to notice new uploads.
+    probeBatches: 2,
+    // A run must add at least this many cards for the pool to count as alive.
+    // Below it the refill backs off (see poolExhaustedAt) instead of hammering
+    // the same half-drained well on every scroll -- the "every scroll waits
+    // seconds for two cards" behaviour the user reported.
+    minYieldToStayOpen: 6,
     // After a refill that added nothing, wait this long before trying again.
     // The feed may simply be over; hammering InnerTube helps no one.
     emptyCooldownMs: 15000,
-    // After the recommendation POOL is exhausted (a refill added nothing AND
-    // the continuation chain ended), the same browse answers identically for a
-    // while. Back off this long before probing for a newly-rotated pool.
-    poolRetryMs: 120000,
+    // The recommendation pool is finite per browse, but it is NOT dead: new
+    // uploads and YouTube's own rotation refill it constantly. When a refill
+    // finds nothing, the extension quietly probes again after this window
+    // instead of stopping and telling the user to reload the page. No reload:
+    // the probe re-browses with the same credentials and the page's own
+    // dedupe, so genuinely new cards keep appearing on their own forever.
+    poolRetryMs: 45000,
+    // One load event gathers everything it can within this window and then
+    // delivers it as a SINGLE dense wall of cards. The user asked for "много
+    // сразу, за раз, за пару секунд максимум" -- not a trickle stretched over
+    // 10+ seconds every scroll. The saved continuation token continues the
+    // same chain on the next scroll, so nothing is lost -- each event is just
+    // fast, and the whole pool still gets covered across a few scrolls.
+    burstWindowMs: 3000,
     requestTimeoutMs: 12000,
     settleQuietMs: 3000
   };
@@ -1640,6 +1697,12 @@
   const refillState = {
     videoIds: new Set(),
     templateCard: null,
+    // The template's own channel name, captured from whichever element renders
+    // it. Refilled cards are rewritten BY CONTENT (find the captured text,
+    // replace it) rather than by a guessed selector, because every layout
+    // YouTube ships puts the channel somewhere slightly different and a
+    // selector miss was the 1.24-1.26 "one channel under all cards" bug.
+    templateChannel: "",
     running: false,
     added: 0,
     batches: 0,
@@ -1669,6 +1732,25 @@
     responseStatus: 0,
     responseKeys: [],
     firstContentTag: "",
+    // Where the extracted ids were found: the rich grid, continuation actions,
+    // or an "other" subtree (shelves/entities that escaped the skip list). A
+    // refill that produces mostly music shows up here as non-grid sources,
+    // which is exactly the 1.25.0 report ("опять музыка, не похоже на выдачу").
+    sources: { root: 0, grid: 0, actions: 0 },
+    nonFeedSkipped: 0,
+    // The JSON path and own keys of the FIRST extracted video, plus a flat
+    // inventory of every key in the response. Together they name the exact
+    // container a shape change hides videos in, so a "0 videos" or "mostly
+    // music" report is diagnosable instead of guesswork.
+    firstVideoPath: "",
+    videoShape: [],
+    keyInventory: [],
+    // The template card's captured channel and its full element-shape list, so
+    // the report shows exactly what the refill clones and rewrites.
+    templateChannel: "",
+    templateDom: [],
+    templateCard: "",
+    templateByline: "",
     pageHasWatchAnchors: false,
     matchedTemplate: false
   };
@@ -1709,6 +1791,105 @@
     }, 2000);
   }
 
+  // Where the channel name lives on a card, across the layouts YouTube has
+  // shipped. #byline is the legacy spot; ytd-channel-name is used on channel
+  // and watch pages; the modern home lockup renders the channel as the FIRST
+  // text span of the metadata line (the later spans are views/date — which is
+  // why only the first match is rewritten). A refilled card that cannot find
+  // one of these keeps the template's channel, which is the 1.24.0 regression
+  // the user saw as "Gamers Nexus under every card".
+  const BYLINE_SELECTOR = [
+    "#byline",
+    "ytd-channel-name yt-formatted-string",
+    "ytd-channel-name #text",
+    "#channel-name yt-formatted-string",
+    "#channel-name #text",
+    ".yt-content-metadata-view-model__metadata-text",
+    "#channel-name"
+  ].join(", ");
+
+  // The unique element shapes inside a card, in document order. Diagnostics
+  // renders this so the actual layout of the cloned card is visible: if the
+  // channel rewrite misses, the element that holds the channel name shows up
+  // here and the selector can be made to match it.
+  function cardDomSummary(card, cap) {
+    const seen = new Set();
+    const out = [];
+    const queue = [card];
+    let guard = 0;
+    while (queue.length && guard < 3000 && out.length < (cap || 50)) {
+      guard += 1;
+      const el = queue.shift();
+      if (!el || !el.tagName) continue;
+      const cls = typeof el.className === "string" && el.className
+        ? "." + String(el.className).trim().split(/\s+/).slice(0, 2).join(".")
+        : "";
+      const token = el.tagName.toLowerCase() + (el.id ? "#" + el.id : "") + cls;
+      if (!seen.has(token)) {
+        seen.add(token);
+        out.push(token);
+      }
+      if (el.children) {
+        for (const child of el.children) queue.push(child);
+      }
+    }
+    return out;
+  }
+
+  // The channel name as the template card actually renders it, in any layout:
+  // try the known byline spots first, then any element whose href points at a
+  // channel page, then the handle (@name) of the first text-bearing leaf. A
+  // leaf whose text is a duration or a views/date string is never a channel.
+  function captureTemplateChannel(template) {
+    if (!template || typeof template.querySelector !== "function") return "";
+    const candidates = [
+      template.querySelector(BYLINE_SELECTOR),
+      template.querySelector("a[href^='/@']"),
+      template.querySelector("a[href*='/@']"),
+      template.querySelector(".yt-lockup-metadata-view-model__metadata-link"),
+      template.querySelector("ytd-channel-name")
+    ];
+    for (const el of candidates) {
+      if (!el || !el.textContent) continue;
+      const text = String(el.textContent).replace(/\s+/g, " ").trim();
+      if (!text) continue;
+      if (/^\d{1,2}:\d{2}$/.test(text)) continue;
+      if (/просмотр|year|ago\b|subscriber|подписчик/i.test(text)) continue;
+      // Some layouts merge "channel · views · date" into one string; the
+      // channel is the part before the first separator.
+      const first = text.split(/\s*[·•|]\s*/)[0].trim();
+      if (first) return first;
+    }
+    const all = template.querySelectorAll("a, span, yt-formatted-string, div");
+    for (const el of all || []) {
+      if (!el || (el.children && el.children.length > 0)) continue;
+      const text = String(el.textContent || "").trim();
+      if (text.includes("@")) return text;
+    }
+    return "";
+  }
+
+  // Rewrites the channel on a CLONED card by content: find the leaves whose text
+  // starts with the template's captured channel (exact, or merged with the
+  // " · views · date" tail) and replace the channel part only (up to 3 leaves,
+  // in case the name is duplicated). Any layout is handled, because the text
+  // itself is the locator -- no selector to guess.
+  function rewriteChannelByContent(card, templateChannel, bylineText) {
+    if (!templateChannel) return 0;
+    let hits = 0;
+    const nodes = card.querySelectorAll("*");
+    for (const el of nodes) {
+      if (hits >= 3) break;
+      if (el.children && el.children.length > 0) continue;
+      const text = String(el.textContent || "").trim();
+      if (!text || text.indexOf(templateChannel) !== 0) continue;
+      const rest = text.slice(templateChannel.length);
+      el.textContent = (bylineText || "") + rest;
+      hits += 1;
+    }
+    return hits;
+  }
+
   // A real card to copy the shape of. Prefer a plain video card over a shelf or
   // a Shorts lockup, since those have very different internal structure.
   function findRefillTemplate() {
@@ -1725,21 +1906,72 @@
       });
     refillProbe.matchedTemplate = candidates.length > 0;
     refillState.templateCard = candidates[0] || null;
+    const template = refillState.templateCard;
+    if (template) {
+      // Record what kind of card was cloned and which element the byline
+      // rewrite will hit, so Diagnostics can say why a rewrite missed.
+      const cls = typeof template.className === "string" && template.className
+        ? "." + String(template.className).trim().split(/\s+/).slice(0, 2).join(".")
+        : "";
+      refillProbe.templateCard = template.tagName.toLowerCase() + cls;
+      const bylineEl = template.querySelector(BYLINE_SELECTOR);
+      refillProbe.templateByline = bylineEl
+        ? bylineEl.tagName.toLowerCase() +
+          (typeof bylineEl.className === "string" && bylineEl.className
+            ? "." + String(bylineEl.className).trim().split(/\s+/)[0] : "") +
+          ': "' + String(bylineEl.textContent || "").trim().slice(0, 24) + '"'
+        : "none";
+      // The channel text the refill will rewrite by content, and the full set
+      // of element shapes in the card, so a miss is diagnosable from the
+      // report instead of requiring another test round.
+      refillState.templateChannel = captureTemplateChannel(template);
+      refillProbe.templateChannel = refillState.templateChannel;
+      refillProbe.templateDom = cardDomSummary(template);
+    }
     return refillState.templateCard;
   }
 
   // Subtrees that are NOT the home feed. Music mixes, Shorts, shelves and
   // playlists are either irrelevant to the main grid or already rendered by
-  // YouTube elsewhere on the page, and refilling them made the 1.22.0 report
+  // YouTube elsewhere on the page, and refilling them made the reports
   // "подавляющая часть - музыка" (mostly music, nothing like the home feed).
-  // Skipping them keeps the refill inside the rich grid, so the added cards
-  // match the feed the user is actually reading.
+  // frameworkUpdates is the Polymer entity store: on a browse response it
+  // carries hundreds of lockupViewModels that are NOT grid rows, and they
+  // skewed both the extractions and the diagnostics. Topbar/header/sidebar are
+  // page furniture. Skipping all of them keeps the refill inside the rich
+  // grid, so the added cards match the feed the user is actually reading.
   const NON_FEED_KEYS = new Set([
-    "richShelfRenderer", "shelfRenderer", "musicShelfRenderer", "reelShelfRenderer",
-    "horizontalCardListRenderer", "expandedShelfContentsRenderer",
+    "richShelfRenderer", "shelfRenderer", "videoShelfRenderer", "musicShelfRenderer",
+    "reelShelfRenderer", "horizontalCardListRenderer", "expandedShelfContentsRenderer",
     "merchandiseShelfRenderer", "heroShelfRenderer", "shortsLockupViewModel",
-    "playlistVideoListRenderer", "compactRadioRenderer", "radioRenderer"
+    "musicResponsiveListItemRenderer", "musicTwoRowItemRenderer",
+    "playlistVideoListRenderer", "compactRadioRenderer", "radioRenderer",
+    "frameworkUpdates", "topbar", "header", "sidebar", "engagementPanel", "playerOverlay"
   ]);
+
+  // A flat inventory of every key in a response, with occurrence counts. The
+  // Diagnostics render it so a response that yields 0 videos (or suspicious
+  // ones) can be diagnosed by its SHAPE instead of guessed at: if the music
+  // rows live under keys we do not recognise, their names show up here with
+  // their counts, and the right skip/parse follows.
+  function keyInventory(data, cap) {
+    const counts = new Map();
+    const queue = [data];
+    let guard = 0;
+    while (queue.length && guard < 500000) {
+      guard += 1;
+      const node = queue.shift();
+      if (!node || typeof node !== "object") continue;
+      for (const [key, value] of Object.entries(node)) {
+        counts.set(key, (counts.get(key) || 0) + 1);
+        if (value && typeof value === "object") queue.push(value);
+      }
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, cap || 60)
+      .map(([key, count]) => key + " x" + count);
+  }
 
   // Pulls every video out of one browse/continuation response.
   //
@@ -1753,12 +1985,20 @@
     const out = [];
     const seen = new Set();
     const counts = refillProbe.idKinds;
-    const queue = [data];
+    const sources = refillProbe.sources;
+    // Each queued entry remembers which subtree it came from (so Diagnostics
+    // can tell grid rows from continuation actions from unexplained "other"
+    // nodes) and the JSON path of the first found video, which names the exact
+    // container when a shape changes under us.
+    const queue = [[data, "root", ""]];
     let guard = 0;
     while (queue.length && guard < 200000) {
       guard += 1;
-      const node = queue.shift();
+      const pair = queue.shift();
+      const node = pair[0];
       if (!node || typeof node !== "object") continue;
+      const src = pair[1];
+      const path = pair[2];
       const flat = node.videoId || node.video_id || "";
       let id = typeof flat === "string" ? flat : "";
       if (typeof node.videoId === "string") counts.videoId += 1;
@@ -1773,7 +2013,12 @@
         }
       }
       if (id && /^[A-Za-z0-9_-]{11}$/.test(id) && !seen.has(id)) {
+        if (!refillProbe.firstVideoPath) {
+          refillProbe.firstVideoPath = path;
+          refillProbe.videoShape = Object.keys(node).slice(0, 16).join(", ");
+        }
         seen.add(id);
+        sources[src] = (sources[src] || 0) + 1;
         out.push({
           id,
           title: runsText(node.title) ||
@@ -1796,8 +2041,14 @@
       }
       for (const [key, value] of Object.entries(node)) {
         if (value && typeof value === "object") {
-          if (NON_FEED_KEYS.has(key)) continue;
-          queue.push(value);
+          if (NON_FEED_KEYS.has(key)) {
+            refillProbe.nonFeedSkipped += 1;
+            continue;
+          }
+          let childSrc = src;
+          if (key === "richGridRenderer") childSrc = "grid";
+          else if (key === "onResponseReceivedActions") childSrc = "actions";
+          queue.push([value, childSrc, path ? path + "." + key : key]);
         }
       }
     }
@@ -1822,30 +2073,43 @@
   // nests it in metadataRows, and the row part that navigates to a channel
   // page is the channel's own name. Missing it was the 1.24.0 bug where every
   // cloned card kept the template's channel ("Gamers Nexus" under everything).
+  // Some builds have no rows at all and instead merge the whole
+  // "channel · views · date" line into subtitle; the channel is then the part
+  // before the first separator.
   function lockupByline(node) {
-    const meta = node.metadata && node.metadata.lockupMetadataViewModel &&
-      node.metadata.lockupMetadataViewModel.metadata;
-    if (!meta || typeof meta !== "object") return "";
-    const rows = Array.isArray(meta.metadataRows)
+    const vm = node.metadata && node.metadata.lockupMetadataViewModel;
+    if (!vm || typeof vm !== "object") return "";
+    const meta = vm.metadata;
+    const rows = Array.isArray(meta && meta.metadataRows)
       ? meta.metadataRows
-      : (meta.contentMetadataViewModel &&
+      : (meta && meta.contentMetadataViewModel &&
           Array.isArray(meta.contentMetadataViewModel.metadataRows)
         ? meta.contentMetadataViewModel.metadataRows
         : []);
-    let firstNonEmpty = "";
-    for (const row of rows) {
-      if (!row || !Array.isArray(row.metadataParts)) continue;
-      for (const part of row.metadataParts) {
-        if (!part || typeof part !== "object") continue;
-        const text = runsText(part.text);
-        if (!text) continue;
-        if (!firstNonEmpty) firstNonEmpty = text;
-        if (part.navigationEndpoint && part.navigationEndpoint.browseEndpoint) {
-          return text;
+    if (rows.length) {
+      let firstNonEmpty = "";
+      for (const row of rows) {
+        if (!row || !Array.isArray(row.metadataParts)) continue;
+        for (const part of row.metadataParts) {
+          if (!part || typeof part !== "object") continue;
+          const text = runsText(part.text);
+          if (!text) continue;
+          if (!firstNonEmpty) firstNonEmpty = text;
+          if (part.navigationEndpoint && part.navigationEndpoint.browseEndpoint) {
+            return text;
+          }
         }
       }
+      if (firstNonEmpty) return firstNonEmpty;
     }
-    return firstNonEmpty;
+    const subtitle = typeof vm.subtitle === "string"
+      ? vm.subtitle
+      : (vm.subtitle && typeof vm.subtitle.content === "string" ? vm.subtitle.content : "");
+    if (subtitle && subtitle.trim()) {
+      const first = subtitle.split(/\s*[·•|]\s*/, 1)[0].trim();
+      if (first) return first;
+    }
+    return "";
   }
 
   function pickThumbnail(node) {
@@ -2043,11 +2307,22 @@
       });
     }
 
-    const byline = card.querySelector("#byline, .yt-content-metadata-view-model__metadata-text");
-    // Always write the byline, including to an empty string: a cloned card
-    // carries the template channel's name, and an extraction miss must blank it
-    // (the 1.24.0 bug: every refilled card showed the template's channel).
-    if (byline) byline.textContent = video.byline || "";
+    // The channel name. FIRST rewrite by content: whatever element(s) still
+    // show the template's captured channel get the new channel (or are
+    // blanked), no matter which layout YouTube shipped. Then a guarded
+    // selector write as a fallback for shapes never seen before: only fire
+    // when the selector's element itself still shows the old channel, so the
+    // views/date line (which is also in the metadata-text spans) can never be
+    // clobbered with a channel name.
+    const templateChannel = refillState.templateChannel || "";
+    rewriteChannelByContent(card, templateChannel, video.byline || "");
+    const byline = card.querySelector(BYLINE_SELECTOR);
+    if (!templateChannel) {
+      // No channel captured from the template: keep the old best-effort write.
+      if (byline) byline.textContent = video.byline || "";
+    } else if (byline && (byline.textContent || "").trim() === templateChannel) {
+      byline.textContent = video.byline || "";
+    }
 
     return card;
   }
@@ -2081,6 +2356,11 @@
       refillState.videoIds.add(video.id);
       rememberRefillSeen(video.id);
       added += 1;
+      if ((diag.refillSample || []).length < 40) {
+        diag.refillSample = diag.refillSample || [];
+        diag.refillSample.push((video.title || "?").slice(0, 60) + " ∎ " +
+          (video.byline || "?").slice(0, 30) + " ∎ " + video.id);
+      }
     }
     return added;
   }
@@ -2121,6 +2401,11 @@
   async function requestFreshFeedVideos(config, token) {
     refillProbe.idKinds = { videoId: 0, video_id: 0, contentId: 0 };
     refillProbe.responseKeys = [];
+    refillProbe.sources = { root: 0, grid: 0, actions: 0 };
+    refillProbe.nonFeedSkipped = 0;
+    refillProbe.firstVideoPath = "";
+    refillProbe.videoShape = [];
+    refillProbe.keyInventory = [];
     const client = { clientName: "WEB", clientVersion: config.clientVersion };
     if (config.visitorData) client.visitorData = config.visitorData;
     let data;
@@ -2141,10 +2426,11 @@
         throw error;
       }
     }
+    refillProbe.keyInventory = keyInventory(data);
     return { videos: extractVideos(data), token: firstContinuationToken(data) };
   }
 
-  async function refillHomeFeed({ fromLookahead = false } = {}) {
+  async function refillHomeFeed({ fromLookahead = false, probe = false } = {}) {
     if (refillState.running) return;
     if (!state.enabled) return;
     if (location.pathname !== "/") return;
@@ -2188,10 +2474,23 @@
     refillProbe.idKinds = { videoId: 0, video_id: 0, contentId: 0 };
     refillProbe.responseStatus = 0;
     refillProbe.responseKeys = [];
+    refillProbe.sources = { root: 0, grid: 0, actions: 0 };
+    refillProbe.nonFeedSkipped = 0;
+    refillProbe.firstVideoPath = "";
+    refillProbe.videoShape = [];
+    refillProbe.keyInventory = [];
     refillProbe.pageHasWatchAnchors = false;
     refillProbe.matchedTemplate = false;
     refillProbe.reachedAppend = false;
     refillProbe.noContainer = "";
+    refillProbe.templateCard = "";
+    refillProbe.templateByline = "";
+    refillProbe.templateChannel = "";
+    refillProbe.templateDom = [];
+    // What was actually handed to the feed this run: "title ∎ channel ∎ id".
+    // The report then shows whether the refill adds music, repeats, or real
+    // lookalikes of the feed, instead of leaving the user to eyeball cards.
+    diag.refillSample = [];
     diag.refillChainReset = false;
     seedRefillVideoIds();
     const known = refillState.videoIds.size;
@@ -2201,18 +2500,26 @@
       refillState.batches = 0;
       let token = refillState.nextToken || "";
       let chainEnded = false;
-      for (let batch = 0; batch < REFILL.maxBatches; batch += 1) {
+      // A quiet probe (pool was dry) only walks a couple of pages -- enough to
+      // notice new uploads -- instead of re-requesting the whole deep chain.
+      const budget = probe ? REFILL.probeBatches : REFILL.maxBatches;
+      // ONE load event, done in a couple of seconds max. Everything gathered
+      // is delivered as a single wall of cards at the end, not stretched into
+      // a trickle every 10+ seconds. The saved continuation token lets the
+      // next scroll continue deeper into the same chain.
+      const runDeadline = Date.now() + REFILL.burstWindowMs;
+      const pending = [];
+      for (let batch = 0; batch < budget; batch += 1) {
+        if (Date.now() > runDeadline) break;
         const { videos, token: nextToken } = await requestFreshFeedVideos(config, token);
         refillState.batches += 1;
         const fresh = videos.filter((video) => !refillState.videoIds.has(video.id));
-        if (fresh.length) {
-          added += appendRefilledVideos(fresh);
-          // Cards appear as soon as the batch is parsed, not after the whole
-          // chain. The scan re-filters them; a status line reports progress.
-          if (homeActive) scheduleHomeScan();
-        }
+        if (fresh.length) pending.push(...fresh);
         // Advance the chain even when this batch was all repeats: the next
-        // trigger continues deeper instead of re-serving the same first page.
+        // page of a LIVE chain has genuinely new recommendations, and the
+        // 1.27.0 report shows the feed stalling because the run stopped at
+        // the first all-seen page (~40 runs, ~1 batch each). Only a dead or
+        // echoing chain ends the walk.
         const advanced = Boolean(nextToken) && nextToken !== token;
         token = nextToken || "";
         refillState.nextToken = token;
@@ -2225,8 +2532,12 @@
           chainEnded = true;
           break;
         }
-        if (!fresh.length) break;
-        if (added === 0) break;
+      }
+      // Deliver everything this event collected as ONE dense append, not a
+      // trickle of per-batch inserts. The scan re-filters the new cards.
+      if (pending.length) {
+        added = appendRefilledVideos(pending);
+        if (homeActive) scheduleHomeScan();
       }
       if (chainEnded) {
         refillState.nextToken = "";
@@ -2236,22 +2547,42 @@
       diag.refillAdded = (diag.refillAdded || 0) + added;
       diag.refillBatches = (diag.refillBatches || 0) + refillState.batches;
       diag.refillError = "";
-      if (added > 0) {
+      if (added >= REFILL.minYieldToStayOpen) {
+        // A real yield: the pool is alive and the next scroll may ask again.
         refillState.lastEmptyAt = 0;
-        // The pool produced something, so it is alive again.
         refillState.poolExhaustedAt = 0;
+        clearPoolProbe();
         showFeedStatus("Лента продолжена: +" + added);
-      } else {
+      } else if (added === 0 && chainEnded) {
+        // Absolutely nothing and the chain is dead: the pool is dry RIGHT NOW,
+        // but not forever. Quietly re-probe after the rotation window -- new
+        // uploads and YouTube's own rotation eventually return cards on their
+        // own. No reload, no hard stop, no guilt-tripping toast.
         refillState.lastEmptyAt = Date.now();
-        if (chainEnded) {
-          // Genuinely over: the chain ended and nothing was added. Tell the
-          // user once, and stop repeating the identical browse request for a
-          // while. A fresh rotation (or a page reload, which resets this state)
-          // brings new recommendations.
-          if (!refillState.poolExhaustedAt) {
-            refillState.poolExhaustedAt = Date.now();
-            showFeedStatus("Лента окончена — новые рекомендации появятся позже или после обновления страницы");
-          }
+        if (!refillState.poolExhaustedAt) {
+          showFeedStatus("Рекомендации временно закончились — автоматически подтяну новые");
+        }
+        refillState.poolExhaustedAt = Date.now();
+        armPoolProbe();
+      } else if (chainEnded && added <= 1) {
+        // Nearly dry: one card or less from a dead chain. Same quiet reprobe.
+        refillState.lastEmptyAt = Date.now();
+        refillState.poolExhaustedAt = Date.now();
+        armPoolProbe();
+      } else {
+        // A few cards, or the chain is still alive: brief cooldown, then the
+        // next scroll continues from where this run left off. A quiet probe
+        // that found NOTHING stays gated and re-probes after the window --
+        // the pool simply has not rotated this round, and it never gives up.
+        refillState.lastEmptyAt = Date.now();
+        if (probe && added === 0) {
+          refillState.poolExhaustedAt = Date.now();
+          armPoolProbe();
+        } else {
+          // The pool is alive again: drop any stale probe timer so it cannot
+          // fire later and spuriously re-exhaust a healthy pool.
+          refillState.poolExhaustedAt = 0;
+          clearPoolProbe();
         }
       }
     } catch (error) {
@@ -2261,6 +2592,9 @@
     } finally {
       refillState.running = false;
       diag.refillRunning = false;
+      // Whether a quiet rotation probe is armed (the pool ran dry and the
+      // extension is waiting to re-browse on its own -- no reload needed).
+      diag.refillProbeArmed = Boolean(poolProbeTimer);
       // Make the last refill's internals visible: response status and keys,
       // which id shapes the response carried, whether the page had /watch
       // anchors, and whether a template card matched. A refill that adds 0 must
@@ -2269,6 +2603,15 @@
         status: refillProbe.responseStatus,
         keys: refillProbe.responseKeys,
         ids: refillProbe.idKinds,
+        sources: refillProbe.sources,
+        nonFeedSkipped: refillProbe.nonFeedSkipped,
+        firstVideoPath: refillProbe.firstVideoPath,
+        videoShape: refillProbe.videoShape,
+        keyInventory: refillProbe.keyInventory,
+        templateCard: refillProbe.templateCard,
+        templateByline: refillProbe.templateByline,
+        templateChannel: refillProbe.templateChannel,
+        templateDom: refillProbe.templateDom,
         reachedAppend: refillProbe.reachedAppend,
         hasAnchors: refillProbe.pageHasWatchAnchors,
         template: refillProbe.matchedTemplate,
@@ -2322,6 +2665,25 @@
   let endlessPresses = 0;
   let endlessEmptyPresses = 0;
   let endlessLastRun = 0;
+  // Quiet rotation probe: when the recommendation pool runs dry, a timer
+  // re-browses after poolRetryMs so new uploads/rotated recs keep the feed
+  // growing WITHOUT a page reload and without the user doing anything.
+  let poolProbeTimer = null;
+
+  function clearPoolProbe() {
+    if (poolProbeTimer) {
+      clearTimeout(poolProbeTimer);
+      poolProbeTimer = null;
+    }
+  }
+
+  function armPoolProbe() {
+    clearPoolProbe();
+    poolProbeTimer = window.setTimeout(() => {
+      poolProbeTimer = null;
+      refillHomeFeed({ probe: true });
+    }, REFILL.poolRetryMs);
+  }
   let endlessRunning = false;
   let statusTimer = null;
 

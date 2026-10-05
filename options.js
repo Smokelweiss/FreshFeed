@@ -313,6 +313,17 @@
     lines.push("");
     lines.push("  grid members that look relevant:");
     lines.push("      " + ((d.gridMembers || []).join(", ") || "none"));
+    const tpl = d.templateCardProbe;
+    if (tpl && tpl.card) {
+      lines.push("");
+      lines.push("  template card (live probe):");
+      lines.push("      " + tpl.card +
+        (tpl.channel ? "   captured channel: \"" + String(tpl.channel).slice(0, 30) + "\"" : "") +
+        (tpl.byline ? "   byline el: " + tpl.byline : ""));
+      if ((tpl.dom || []).length) {
+        lines.push("      dom: " + tpl.dom.slice(0, 14).join(" | ") + (tpl.dom.length > 14 ? " | …(" + (tpl.dom.length - 14) + " more)" : ""));
+      }
+    }
     if ((d.apiMembers || []).length) {
       lines.push("  api members:");
       lines.push("      " + d.apiMembers.join(", "));
@@ -351,6 +362,7 @@
     lines.push("  saved continuation : " + yes(d.refillTokenChain));
     lines.push("  chain reset on stall: " + yes(d.refillChainReset));
     lines.push("  pool exhausted      : " + yes(d.refillPoolExhausted) + (d.refillPoolExhausted ? "   (backing off until YouTube rotates)" : ""));
+    lines.push("  auto re-probe armed : " + yes(d.refillProbeArmed) + (d.refillProbeArmed ? "   (quietly re-checks YouTube in ~45s, no reload)" : ""));
     lines.push("  last error         : " + (d.refillError || "none"));
     const p = d.refillProbe;
     if (p && (p.keys.length || p.status)) {
@@ -359,7 +371,34 @@
       lines.push("  videoId / video_id / contentId: " + p.ids.videoId + " / " + p.ids.video_id + " / " + p.ids.contentId);
       lines.push("  reached append     : " + yes(p.reachedAppend));
       lines.push("  page has /watch anchors: " + yes(p.hasAnchors) + "  template matched: " + yes(p.template));
+      if (p.sources) {
+        lines.push("  video sources        : grid " + (p.sources.grid || 0) + " / actions " + (p.sources.actions || 0) + " / other " + (p.sources.root || 0) + (p.nonFeedSkipped ? "   (skipped " + p.nonFeedSkipped + " non-feed subtrees)" : ""));
+      }
+      if (p.firstVideoPath) {
+        lines.push("  first video path     : " + p.firstVideoPath);
+        if (p.videoShape && p.videoShape.length) {
+          lines.push("  video node keys      : " + p.videoShape);
+        }
+      }
+      if (p.keyInventory && p.keyInventory.length) {
+        lines.push("  response key counts  : ");
+        p.keyInventory.slice(0, 16).forEach((k) => lines.push("      " + k));
+        if (p.keyInventory.length > 16) {
+          lines.push("      … (" + (p.keyInventory.length - 16) + " more)");
+        }
+      }
+      if (p.templateCard) lines.push("  template card        : " + p.templateCard);
+      if (p.templateByline) lines.push("  template byline      : " + p.templateByline);
+      if (p.templateChannel) lines.push("  template channel     : \"" + String(p.templateChannel).slice(0, 40) + "\"");
+      if ((p.templateDom || []).length) {
+        lines.push("  template dom         : " + p.templateDom.slice(0, 10).join(" | ") + (p.templateDom.length > 10 ? " | …" : ""));
+      }
       if (p.why) lines.push("  why nothing added  : " + p.why);
+    }
+    const sample = d.refillSample || [];
+    if (sample.length) {
+      lines.push("  added this run       : " + sample.length + " cards");
+      sample.forEach((line) => lines.push("      " + line));
     }
     lines.push("");
     lines.push("Subscription sync");

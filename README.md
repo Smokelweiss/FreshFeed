@@ -34,7 +34,10 @@ asks for more rows when the buffer below the fold is thin rather than when the
 user happens to be scrolling, waits long enough that a slow response is not
 mistaken for a dead end, and re-arms itself so it works with the tab idle.
 
-The feed is finite, so "endless" means "never dead-ends while you scroll".
+The feed is finite, so "endless" means "never dead-ends while you scroll": when
+the recommendation pool runs dry the extension does not stop and ask you to
+reload — it quietly re-browses on its own after a short window, and new uploads
+plus YouTube's own rotation keep the feed growing by itself.
 
 When YouTube runs out of continuation tokens it does not simply stop: it renders
 a **"Show more" button** at the bottom of the grid. Endless feed presses that
@@ -120,9 +123,12 @@ the `richGridRenderer`, and both are preferred over the flat scan. Music,
 Shorts, shelf and playlist subtrees are also skipped when turning the
 response into feed cards, so a refill adds feed, not a music wall.
 
-Refills are also small and incremental: each run fetches up to three batches
-and appends cards as each one arrives, so the first pictures appear in about
-a second rather than after a long request chain. Smooth scroll and endless
+Refills are bursts, not trickles: one load event gathers everything it can
+within a ~3-second window (up to twelve continuation batches) and delivers it
+as a single dense wall of cards. The saved continuation token continues the
+same chain on the next scroll, so each event is fast and the whole pool is
+still covered across a few scrolls — there is no "every 10+ seconds a handful
+of cards". Smooth scroll and endless
 feed share the same refill: when there is no continuation element to nudge (a
 build where Polymer never hydrates the grid), smooth scroll hands the work to
 the refill so the buffer keeps filling as the user reads, and endless feed
@@ -141,9 +147,14 @@ leaving the template card's channel under every video. Videos already handed
 out by a refill are remembered across page loads, so a fresh session no longer
 re-append the same recommendations ("почти идентичных предыдущей попытке").
 When the recommendation pool is genuinely over (nothing added and the chain
-ended), the refill says so once and backs off for a couple of minutes until
-YouTube rotates the pool, instead of silently re-requesting the identical
-browse on every scroll; a page reload starts a fresh rotation.
+ended), the refill says so once and does not stop for good: it arms a quiet
+rotation probe that re-browses after ~45 seconds. There is **no page reload**
+and no "refresh the page" message — as soon as YouTube has something new (a
+fresh upload, a rotated recommendation set), the probe notices it and the
+cards appear on their own. While the pool is dry the probe only walks two
+batches, enough to notice new content without hammering InnerTube for a
+mostly-seen pool; when a scroll-triggered refill finds fresh content again,
+the full deep walk resumes.
 
 
 ## Quick start

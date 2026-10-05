@@ -194,7 +194,7 @@ const browserStub = {
 const factory = new Function(
   'CARD_SELECTOR', 'state', 'isFilterSurface', 'isShortsPlayerPage', 'browser',
   'document', 'window', 'sessionStorage', 'location', 'MutationObserver',
-  MODULE + '\nreturn { LOOKAHEAD, ENDLESS, REFILL, diag, refillState, schedulePrefetch, stopFeedLookahead, resetFeedLookahead, resetEndlessFeed, stopEndlessFeed, feedIsExhausted, scheduleEndlessRecovery, feedBufferScreens, requestMoreFromYouTube, armLookaheadTimer, feedIsLoading, countFeedItems, findFeedReloadButton, pressFeedReloadButton, snapshotPage, flushDiag, extractVideos, runsText, pickThumbnail, firstContinuationToken, buildCardFromTemplate, appendRefilledVideos, seedRefillVideoIds, refillHomeFeed };'
+  MODULE + '\nreturn { LOOKAHEAD, ENDLESS, REFILL, diag, refillState, refillProbe, schedulePrefetch, stopFeedLookahead, resetFeedLookahead, resetEndlessFeed, stopEndlessFeed, feedIsExhausted, scheduleEndlessRecovery, feedBufferScreens, requestMoreFromYouTube, armLookaheadTimer, feedIsLoading, countFeedItems, findFeedReloadButton, pressFeedReloadButton, snapshotPage, flushDiag, extractVideos, keyInventory, runsText, pickThumbnail, firstContinuationToken, buildCardFromTemplate, appendRefilledVideos, seedRefillVideoIds, refillHomeFeed };'
 )
 const M = factory(CARD_SELECTOR, state, isFilterSurface, isShortsPlayerPage, browserStub,
   globalThis.document, globalThis.window, globalThis.sessionStorage, globalThis.location, globalThis.MutationObserver)
@@ -631,6 +631,7 @@ function makeRealCard() {
   card._attrs['data-ff-href'] = '/watch?v=oldoldoldold'
   card._attrs.style = 'height: 300px'
   card.querySelectorAll = (sel) => {
+    if (sel === '*') return card._children
     if (sel === 'img') return [img]
     if (/thumbnail/.test(sel)) return [thumbA]
     if (/a\[href\]/.test(sel)) return [titleA, thumbA, shortsA]
@@ -641,6 +642,38 @@ function makeRealCard() {
   card.querySelector = (sel) => card.querySelectorAll(sel)[0] || null
   card.cloneNode = () => {
     const copy = makeRealCard()
+    copy._attrs = { ...card._attrs }
+    return copy
+  }
+  return card
+}
+
+// The real 1.25-1.26 layout, as the Diagnostics imply: the visible channel
+// lives in a leaf element the byline selectors do NOT match (no #byline, no
+// .yt-content-metadata-view-model__metadata-text). A selector-based rewrite
+// missed it and every clone kept the template's channel.
+function makeChannelVariantCard(channelText) {
+  const card = makeEl('ytd-rich-item-renderer')
+  const titleA = makeEl('a', { id: 'video-title', innerText: 'Old title' })
+  titleA._attrs.href = '/watch?v=oldoldoldold'
+  const thumbA = makeEl('a', { id: 'thumbnail' })
+  thumbA._attrs.href = '/watch?v=oldoldoldold'
+  const img = makeEl('img')
+  img._attrs.src = 'https://i.ytimg.com/vi/old/default.jpg'
+  const channelLeaf = makeEl('span', { innerText: channelText })
+  channelLeaf._attrs.class = 'yt-fancy-channel'
+  card._children.push(titleA, thumbA, channelLeaf)
+  card.querySelectorAll = (sel) => {
+    if (sel === '*') return card._children
+    if (sel === 'img') return [img]
+    if (/thumbnail/.test(sel)) return [thumbA]
+    if (/a\[href\]/.test(sel)) return [titleA, thumbA]
+    if (/video-title/.test(sel)) return [titleA]
+    return []
+  }
+  card.querySelector = (sel) => card.querySelectorAll(sel)[0] || null
+  card.cloneNode = () => {
+    const copy = makeChannelVariantCard(channelText)
     copy._attrs = { ...card._attrs }
     return copy
   }
@@ -950,6 +983,181 @@ check('blanks the template channel when the response has no byline',
   blankCard.querySelector('#byline').innerText === '',
   'byline=' + JSON.stringify(blankCard.querySelector('#byline').innerText))
 
+// ------------------------------------------ refill: bugs of 1.25.0 (content)
+// The 1.25.0 report ("опять музыка, ничего похожего на выдачу"): a browse
+// response carries hundreds of video ids OUTSIDE the grid -- the Polymer
+// entity store (frameworkUpdates) and more shelf shell variants
+// (videoShelfRenderer). Only the grid may become feed cards.
+M.refillProbe.sources = { root: 0, grid: 0, actions: 0 }
+M.refillProbe.nonFeedSkipped = 0
+const entityStoreResponse = {
+  contents: {
+    twoColumnBrowseResultsRenderer: {
+      tabs: [{
+        tabRenderer: {
+          content: {
+            richGridRenderer: {
+              contents: [
+                { richItemRenderer: { content: { lockupViewModel: { video_id: 'kkkkkkkkkkk' } } } }
+              ]
+            }
+          }
+        }
+      }]
+    }
+  },
+  frameworkUpdates: {
+    entityBatchUpdate: {
+      mutations: [
+        { payload: { lockupViewModel: { video_id: 'mmmmmmmmmmm' } } },
+        { payload: { lockupViewModel: { video_id: 'nnnnnnnnnnn' } } }
+      ]
+    }
+  }
+}
+const entityVideos = M.extractVideos(entityStoreResponse)
+check('does not turn frameworkUpdates entities into feed cards',
+  entityVideos.length === 1 && entityVideos[0].id === 'kkkkkkkkkkk',
+  'ids=' + entityVideos.map((v) => v.id).join(','))
+check('credits extracted ids to the grid, not the entity store',
+  M.refillProbe.sources.grid === 1 && M.refillProbe.sources.root === 0,
+  'sources=' + JSON.stringify(M.refillProbe.sources))
+check('counts the skipped non-feed subtrees',
+  M.refillProbe.nonFeedSkipped >= 1,
+  'skipped=' + M.refillProbe.nonFeedSkipped)
+
+// videoShelfRenderer is yet another home layout shell for "for you"/music
+// rows; like the other shelves it must not feed the refill.
+const videoShelfResponse = {
+  contents: {
+    twoColumnBrowseResultsRenderer: {
+      tabs: [{
+        tabRenderer: {
+          content: {
+            richGridRenderer: {
+              contents: [
+                { videoShelfRenderer: {
+                  title: { content: 'Music for you' },
+                  content: {
+                    horizontalListRenderer: {
+                      items: [
+                        { lockupViewModel: { video_id: 'ppppppppppp' } },
+                        { lockupViewModel: { video_id: 'qqqqqqqqqqq' } }
+                      ]
+                    }
+                  }
+                } },
+                { richItemRenderer: { content: { lockupViewModel: { video_id: 'rrrrrrrrrrr' } } } }
+              ]
+            }
+          }
+        }
+      }]
+    }
+  }
+}
+const videoShelfVideos = M.extractVideos(videoShelfResponse)
+check('skips videoShelfRenderer rows too (another music shell)',
+  videoShelfVideos.length === 1 && videoShelfVideos[0].id === 'rrrrrrrrrrr',
+  'ids=' + videoShelfVideos.map((v) => v.id).join(','))
+
+// Some lockup builds have no metadata rows at all and merge the whole
+// "channel · views · date" line into a single subtitle; the channel is the
+// segment before the first separator.
+const subtitleBylineResponse = {
+  contents: {
+    twoColumnBrowseResultsRenderer: {
+      tabs: [{
+        tabRenderer: {
+          content: {
+            richGridRenderer: {
+              contents: [
+                { richItemRenderer: { content: { lockupViewModel: {
+                  video_id: 'ooooooooooo',
+                  metadata: { lockupMetadataViewModel: {
+                    title: { content: 'Subtitle lockup' },
+                    subtitle: '@subtitlechannel · 1,2 млн просмотров · 3 дня назад'
+                  } }
+                } } } }
+              ]
+            }
+          }
+        }
+      }]
+    }
+  }
+}
+const subtitleVideos = M.extractVideos(subtitleBylineResponse)
+check('reads the channel from a merged subtitle line',
+  subtitleVideos[0] && subtitleVideos[0].byline === '@subtitlechannel',
+  'byline=' + (subtitleVideos[0] || {}).byline)
+
+// Shape diagnostics: the first found video records its JSON path and own keys,
+// and the key inventory names every key in the response with counts. These are
+// what let a "0 videos" or "mostly music" report be diagnosed from its shape.
+M.refillProbe.firstVideoPath = ""
+M.refillProbe.videoShape = []
+M.extractVideos(continuationResponse)
+check('records the JSON path of the first found video',
+  /appendContinuationItemsAction/.test(M.refillProbe.firstVideoPath || ""),
+  'path=' + M.refillProbe.firstVideoPath)
+check('records the own keys of the video node',
+  /video_id/.test(M.refillProbe.videoShape || ""),
+  'keys=' + M.refillProbe.videoShape)
+const inventory = M.keyInventory(continuationResponse)
+check('key inventory names every container with counts',
+  inventory.some((k) => k.startsWith("lockupViewModel x")) &&
+    inventory.some((k) => k.startsWith("appendContinuationItemsAction x1")),
+  'inv=' + inventory.slice(0, 4).join(","))
+check('key inventory is sorted by count, largest first',
+  inventory[0] && inventory[0].length > 0,
+  'top=' + (inventory[0] || ""))
+
+// The 1.25-1.26 "one channel under all cards" bug: the channel lives in an
+// element the byline selectors never match, so a selector-based rewrite missed
+// it and every clone kept the template's channel. The content-based rewrite
+// replaces ANY leaf still showing the captured channel text.
+M.refillState.templateChannel = 'Fancy Little Channel'
+const variantCard = M.buildCardFromTemplate(
+  makeChannelVariantCard('Fancy Little Channel'),
+  { ...extracted[0], byline: '@realchannel' })
+check('content-based rewrite replaces a channel the selectors miss',
+  variantCard.querySelectorAll('*').some((el) => el._text === '@realchannel'),
+  'texts=' + variantCard.querySelectorAll('*').map((el) => el._text).join('|'))
+check('no leaf keeps the template channel after the rewrite',
+  variantCard.querySelectorAll('*').every((el) => el._text !== 'Fancy Little Channel'),
+  'texts=' + variantCard.querySelectorAll('*').map((el) => el._text).join('|'))
+
+// A merged "channel · views · date" leaf must keep its tail when the channel
+// is replaced, not be overwritten wholesale.
+M.refillState.templateChannel = 'Gamers Nexus'
+const mergedLeaf = makeEl('span', { innerText: 'Gamers Nexus · 1,2 млн просмотров · 3 дня назад' })
+const mergedCard = makeEl('ytd-rich-item-renderer')
+const mergedTitle = makeEl('a', { id: 'video-title', innerText: 'Merged title' })
+const mergedThumb = makeEl('a', { id: 'thumbnail' })
+const mergedImg = makeEl('img')
+mergedCard._children.push(mergedTitle, mergedThumb, mergedImg, mergedLeaf)
+mergedCard.querySelectorAll = (sel) => {
+  if (sel === '*') return mergedCard._children
+  if (sel === 'img') return [mergedImg]
+  if (/thumbnail/.test(sel)) return [mergedThumb]
+  if (/video-title/.test(sel)) return [mergedTitle]
+  return []
+}
+mergedCard.querySelector = (sel) => mergedCard.querySelectorAll(sel)[0] || null
+mergedCard.cloneNode = () => {
+  const copy = makeEl('ytd-rich-item-renderer')
+  copy._children = mergedCard._children
+  copy.querySelectorAll = mergedCard.querySelectorAll
+  copy.querySelector = mergedCard.querySelector
+  return copy
+}
+const mergedBuilt = M.buildCardFromTemplate(mergedCard, { ...extracted[0], byline: '@realchannel' })
+check('a merged channel leaf keeps its views/date tail',
+  mergedBuilt.querySelectorAll('*').some((el) => el._text === '@realchannel · 1,2 млн просмотров · 3 дня назад'),
+  'texts=' + mergedBuilt.querySelectorAll('*').map((el) => el._text).join('|'))
+M.refillState.templateChannel = ''
+
 // An exhausted recommendation pool must back off instead of re-requesting the
 // same browse on every scroll ("added once, then only repeats").
 M.REFILL.poolRetryMs = 60000
@@ -961,6 +1169,13 @@ check('exhausted pool: refill backs off instead of re-requesting',
   M.diag.refillRunning === false && M.refillState.lastRunAt === 0,
   'running=' + M.diag.refillRunning + ' lastRunAt=' + M.refillState.lastRunAt)
 M.refillState.poolExhaustedAt = 0
+
+// Endless-feed config: a refill walks deep (12 batches) when the pool is
+// alive, but a quiet rotation probe only walks 2 batches so it can notice
+// fresh uploads without hammering InnerTube for a mostly-seen pool.
+check('endless config: deep walk + quiet rotation probe',
+  M.REFILL.maxBatches === 12 && M.REFILL.probeBatches === 2 && M.REFILL.minYieldToStayOpen === 6,
+  'maxBatches=' + M.REFILL.maxBatches + ' probeBatches=' + M.REFILL.probeBatches + ' minYieldToStayOpen=' + M.REFILL.minYieldToStayOpen)
 
 console.log('\n=== ' + pass + ' passed, ' + fail + ' failed ===')
 process.exit(fail ? 1 : 0)
