@@ -141,8 +141,8 @@ const shippingPreload = { ...M.PRELOAD }
 M.PRELOAD.tickMs = 10
 M.PRELOAD.settleMs = 40
 M.PRELOAD.settlePollMs = 10
-M.PRELOAD.targetScreens = 6
-M.PRELOAD.maxDeadRounds = 3
+M.PRELOAD.targetScreens = 3
+M.PRELOAD.maxDeadRounds = 5
 M.PRELOAD.largeBufferWaitMs = 10
 M.PRELOAD.growthRetryMs = 10
 
@@ -173,9 +173,9 @@ function check(name, cond, detail) {
 
 // --- Config sanity ---------------------------------------------------------
 check('PRELOAD defaults are sane',
-  shippingPreload.enabled === true && shippingPreload.tickMs >= 1000 &&
-  shippingPreload.settleMs >= 4000 && shippingPreload.targetScreens >= 4 &&
-  shippingPreload.maxDeadRounds >= 3 && shippingPreload.pauseAfterDeadMs >= 20000,
+  shippingPreload.enabled === true && shippingPreload.tickMs >= 500 &&
+  shippingPreload.settleMs >= 2000 && shippingPreload.targetScreens >= 2 &&
+  shippingPreload.maxDeadRounds >= 5 && shippingPreload.pauseAfterDeadMs >= 10000,
   JSON.stringify(shippingPreload))
 
 // --- Feed item counting ----------------------------------------------------

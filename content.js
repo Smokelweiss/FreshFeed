@@ -973,6 +973,11 @@ if (diag.page !== location.pathname) {
 diag.checked = document.querySelectorAll("[data-ff-checked='1']").length;
 diag.filteredCardsProcessed = document.querySelectorAll(CARD_SELECTOR).length;
       diag.hidden = document.querySelectorAll("[data-ff-hidden='1']").length;
+// Update preload-related diagnostics
+diag.preloadSetting = state.settings.bgPreload;
+diag.bufferScreens = preloadScreensPending();
+diag.totalScans = (diag.totalScans || 0) + 1;
+diag.pendingCardsAtScan = pendingCards.size;
       diagDirty = true;
       flushDiag();
     }, 150);
@@ -1020,28 +1025,28 @@ diag.filteredCardsProcessed = document.querySelectorAll(CARD_SELECTOR).length;
     enabled: true,
     // Tick of the self-sustaining timer; also the minimum gap between rounds,
     // so the loop can never free-run faster than a human could scroll.
-    tickMs: 1200,
+    tickMs: 800,
     // How much feed to keep beyond the fold (in viewport heights). When this
     // much is already buffered, the loop waits instead of loading pages the
     // user cannot reach yet.
-    targetScreens: 6,
+    targetScreens: 3,
     // How long one round waits for YouTube to actually append a page.
-    settleMs: 6000,
-    settlePollMs: 250,
+    settleMs: 3000,
+    settlePollMs: 200,
     // Rounds that grow nothing before the loop changes strategy or pauses.
     // Reaching the max pauses quietly for a while and retries later; the loop
     // never shuts itself off for good.
-    maxDeadRounds: 6,
-    pauseAfterDeadMs: 30000,
+    maxDeadRounds: 10,
+    pauseAfterDeadMs: 15000,
     // Distance from the absolute bottom (px) used by the real-scroll wake-up.
     // The exact value does not matter: the scroll listener fires on any scroll
     // and recomputes scrollY for itself.
     scrollMargin: 200,
     // How long to wait when the buffer is large (in ms).
-    largeBufferWaitMs: 30000,
+    largeBufferWaitMs: 10000,
     // How long to wait after a successful growth before trying again (in ms).
-    growthRetryMs: 200
-  };;
+    growthRetryMs: 300
+  };
 
   // The preload health lives on the diag snapshot (preloadActive/...), so the
   // options page and the tests read the same state the code mutates.
@@ -1260,8 +1265,14 @@ diag.lastRoundDuration = Date.now() - roundStart;
 
     // Nothing to wake at all: no sentinel and no scroll space. Say so once and
     // pause; the loop still retries later on its own.
-    diag.preloadDeadRounds = PRELOAD.maxDeadRounds;
-    stopPreload("no continuation sentinel and no scroll buffer to wake");
+    // If sentinel exists but nudge failed, keep trying (don't count as dead).
+    if (!sentinel) {
+      diag.preloadDeadRounds = PRELOAD.maxDeadRounds;
+      stopPreload("no continuation sentinel and no scroll buffer to wake");
+    } else {
+      // Sentinel exists but nudge didn't trigger growth this round — retry next tick.
+      armPreloadTimer(PRELOAD.tickMs);
+    }
   }
 
   function startPreload() {
@@ -1290,24 +1301,6 @@ diag.lastRoundDuration = Date.now() - roundStart;
   const DIAG_THROTTLE_MS = 1500;
 
   const diag = {
-  // Enhanced diagnostic fields
-  totalScans: 0,
-  totalCardsScanned: 0,
-  totalCardsMarked: 0,
-  totalCardsHidden: 0,
-  bufferScreens: 0,
-  lastError: "",
-  lastErrorTime: 0,
-  fallbackUsed: "",
-  userScrolledDuringPreload: 0,
-  userClickedDuringPreload: 0,
-  browserVersion: navigator.userAgent,
-  youtubeBuild: "",
-  continuationSentinelPresent: false,
-  isIntersectionObserverBuild: false,
-  isScrollListenerBuild: false,
-  feedExhausted: false,
-  storageVersion: 3,
   // Timestamp and session info
   updatedAt: 0,
   sessionStart: Date.now(),
@@ -1319,6 +1312,7 @@ diag.lastRoundDuration = Date.now() - roundStart;
   pendingCardsAtScan: 0,
   // Background preload detailed state
   preloadActive: false,
+  preloadSetting: true,
   preloadRounds: 0,
   preloadDeadRounds: 0,
   preloadGrowth: 0,
@@ -1349,7 +1343,6 @@ diag.lastRoundDuration = Date.now() - roundStart;
   browserVersion: navigator.userAgent,
   youtubeBuild: "",
   continuationSentinelPresent: false,
-  // Detailed state flags
   isIntersectionObserverBuild: false,
   isScrollListenerBuild: false,
   feedExhausted: false,
