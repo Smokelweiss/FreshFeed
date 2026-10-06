@@ -65,9 +65,29 @@
   const durationOptions = document.getElementById("duration-options");
   const uploadDateBetween = document.getElementById("upload-date-between");
   const durationBetween = document.getElementById("duration-between");
+  const uploadDateFilterValue = document.getElementById("upload-date-filter-value");
+  const durationFilterValue = document.getElementById("duration-filter-value");
   const error = document.getElementById("error");
   const settingsButton = document.getElementById("settings");
   const enabledControl = document.getElementById("enabled");
+  const allTrash = document.getElementById("block-all-trash");
+  // Settings that "Block All Trash" switches on at once. These are the three
+  // categories above it (Channels, Content types, Promoted & generated blocks).
+  const TRASH_KEYS = [
+    "hideSubscribedChannels",
+    "hideBlacklisted",
+    "hideShorts",
+    "hidePlayables",
+    "hideMembersOnly",
+    "hideMixRadio",
+    "hideLiveStreams",
+    "hideCommunityPosts",
+    "hideStorefrontShelves",
+    "hidePromoShelves",
+    "hideSurveys",
+    "hideTopicShelves",
+    "hideGeneratedShelves"
+  ];
 
   async function refresh() {
     const data = await browser.storage.local.get([...Object.keys(settingControls), "enabled", "lastSyncResult"]);
@@ -76,6 +96,10 @@
     Object.entries(settingControls).forEach(([key, control]) => {
       control.checked = settings[key] === true;
     });
+    // "Block All Trash" is a live aggregate: it reads as ON while every trash
+    // setting is enabled, and clears itself automatically if the user turns any
+    // one of them off. It is a convenience switch, not a stored setting.
+    allTrash.checked = TRASH_KEYS.every((key) => settings[key] === true);
     // The whole form is inert while the master switch is off, which makes the
     // popup's state readable at a glance.
     document.body.classList.toggle("disabled", !enabledControl.checked);
@@ -87,8 +111,24 @@
     });
     uploadDateOptions.hidden = !settings.filterUploadDate;
     durationOptions.hidden = !settings.filterDuration;
-    uploadDateBetween.hidden = settings.uploadDateMode !== "between";
-    durationBetween.hidden = settings.durationMode !== "between";
+    // Show only the inputs that match the selected mode. "Only past" needs no
+    // threshold (there is no numeric row), "Block older than" shows a single
+    // "Value" row, "Between" shows the two-bound "From..to" range row.
+    uploadDateFilterValue.hidden = !(
+      settings.filterUploadDate && settings.uploadDateMode === "olderThan"
+    );
+    uploadDateBetween.hidden = !(
+      settings.filterUploadDate && settings.uploadDateMode === "between"
+    );
+    // Duration: "Only shorter than" and "Block longer than" use a single value;
+    // "Between" uses the two-bound range row.
+    durationFilterValue.hidden = !(
+      settings.filterDuration &&
+      (settings.durationMode === "onlyShorter" || settings.durationMode === "longerThan")
+    );
+    durationBetween.hidden = !(
+      settings.filterDuration && settings.durationMode === "between"
+    );
     document.querySelector(".unit-label").textContent = settings.uploadDateUnit;
     document.querySelector(".duration-unit-label").textContent = settings.durationUnit;
     const message = typeof data.lastSyncResult === "string" && data.lastSyncResult.startsWith("Sync failed:")
@@ -112,6 +152,15 @@
     control.addEventListener("change", () => browser.storage.local.set({ [key]: control.value }).then(refresh));
   });
   enabledControl.addEventListener("change", () => browser.storage.local.set({ enabled: enabledControl.checked }).then(refresh));
+  allTrash.addEventListener("change", () => {
+    if (!allTrash.checked) return;
+    // Turn every trash setting on. This is a bulk action, not a toggle: the
+    // switch reflects the aggregate state and clearing itself requires turning
+    // one of the individual controls off.
+    const patch = {};
+    TRASH_KEYS.forEach((key) => { patch[key] = true; });
+    browser.storage.local.set(patch).then(refresh);
+  });
   settingsButton.addEventListener("click", () => browser.runtime.openOptionsPage());
   browser.storage.onChanged.addListener(refresh);
   refresh();

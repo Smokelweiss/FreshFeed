@@ -337,8 +337,22 @@
     durationOptions.hidden = !settings.filterDuration;
     uploadDateOptions.setAttribute("aria-hidden", String(!settings.filterUploadDate));
     durationOptions.setAttribute("aria-hidden", String(!settings.filterDuration));
-    document.getElementById("upload-date-between").hidden = settings.uploadDateMode !== "between";
-    document.getElementById("duration-between").hidden = settings.durationMode !== "between";
+    // Show only the inputs that match the selected mode. "Only past" has no
+    // threshold, "Block older than" shows the "Value" row, "Between" shows the
+    // "From..to" range row.
+    document.getElementById("upload-date-filter-value").hidden = !(
+      settings.filterUploadDate && settings.uploadDateMode === "olderThan"
+    );
+    document.getElementById("upload-date-between").hidden = !(
+      settings.filterUploadDate && settings.uploadDateMode === "between"
+    );
+    document.getElementById("duration-filter-value").hidden = !(
+      settings.filterDuration &&
+      (settings.durationMode === "onlyShorter" || settings.durationMode === "longerThan")
+    );
+    document.getElementById("duration-between").hidden = !(
+      settings.filterDuration && settings.durationMode === "between"
+    );
     document.querySelector(".unit-label").textContent = settings.uploadDateUnit;
     document.querySelector(".duration-unit-label").textContent = settings.durationUnit;
     const activeFilters = Object.entries(settingLabels)
