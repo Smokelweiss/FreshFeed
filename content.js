@@ -1266,16 +1266,16 @@ diag.pendingCardsAtScan = pendingCards.size;
     for (const selector of selectors) {
       const candidates = document.querySelectorAll(selector);
       if (candidates.length > 0) {
-        // Filter: prefer buttons that look like "New for you" (not subscribed, etc.)
+        // Filter: pick the button whose text/label actually says "New for you"
         for (const candidate of candidates) {
           const text = (candidate.textContent || '').trim();
           const label = (candidate.getAttribute('aria-label') || '').trim();
-          // Check if this looks like a "New for you" / tab button
+          const normalized = (text + ' ' + label).toLowerCase().replace(/\s+/g, ' ');
           if (
-            /new.?for.?you/i.test(text) ||
-            /new.?for.?you/i.test(label) ||
-            candidate.tagName === 'YT-BUTTON-RENDERER' ||
-            candidate.tagName === 'A'
+            /new.?for.?you/i.test(normalized) ||
+            /новое.?для.?вас/i.test(normalized) ||
+            /novo.?pra.?voce/i.test(normalized) ||
+            /nuevo.?para.?ti/i.test(normalized)
           ) {
             button = candidate;
             break;
