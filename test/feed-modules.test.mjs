@@ -194,17 +194,21 @@ check('findFeedSentinel returns null when the grid has no sentinel',
   M.findFeedSentinel() === null,
   'got ' + M.findFeedSentinel())
 
-// --- Nudge (no-viewport wake of YouTube pagination) -----------------------
+// --- Nudge (invisible wake of YouTube pagination) -------------------------
 world.sentinel = sentinelEl
-check('nudge pulls the sentinel into the viewport without scrolling the page',
+check('nudge translates the sentinel into the viewport without scrolling the page',
   M.nudgeNativeContinuation() === true &&
-    sentinelEl.style.transform === 'translateY(-100vh)' &&
+    /^translateY\(-?\d+px\)$/.test(sentinelEl.style.transform) &&
+    sentinelEl.style.visibility === 'hidden' &&
+    sentinelEl.style.opacity === '0' &&
     world.scrollTop === 0 && M.diag.preloadHook === 'sentinel',
-  'transform=' + sentinelEl.style.transform + ' hook=' + M.diag.preloadHook)
+  'transform=' + sentinelEl.style.transform + ' vis=' + sentinelEl.style.visibility + ' hook=' + M.diag.preloadHook)
 await advance(40)
-check('nudge restores the transform on the next frame',
-  sentinelEl.style.transform === '',
-  'transform=' + sentinelEl.style.transform)
+check('nudge restores the transform and visibility on the next frame',
+  sentinelEl.style.transform === '' &&
+    sentinelEl.style.visibility !== 'hidden' &&
+    sentinelEl.style.opacity !== '0',
+  'transform=' + JSON.stringify(sentinelEl.style.transform) + ' vis=' + JSON.stringify(sentinelEl.style.visibility) + ' opacity=' + JSON.stringify(sentinelEl.style.opacity))
 
 world.sentinel = null
 M.diag.preloadHook = ''
@@ -218,6 +222,27 @@ world.sentinel = sentinelEl
 check('preloadScreensPending measures buffer below the fold',
   Math.abs(M.preloadScreensPending() - 9) < 0.01,
   'screens=' + M.preloadScreensPending())
+
+// --- CRITICAL: the page must never move during a preload cycle ------------
+// This is the whole point of the feature. A real scroll is visible to the
+// user, so the preload must rely only on the transform nudge. Run a full
+// cycle of rounds and assert the viewport position never changed.
+world.sentinel = sentinelEl
+world.scrollTop = 200 // the user has already scrolled a bit; that must survive
+world.scrollHeight = 3000
+const scrollBefore = world.scrollTop
+M.resetPreload()
+M.startPreload()
+// Let several rounds run, including dead ones that must not fall back to a scroll.
+for (let i = 0; i < 8; i++) await advance(120)
+check('preload never scrolls the page during any round',
+  world.scrollTop === scrollBefore,
+  'scrollTop went ' + scrollBefore + ' -> ' + world.scrollTop)
+check('preload never fell back to the removed scroll strategy',
+  M.diag.scrollAttempts === 0,
+  'scrollAttempts=' + M.diag.scrollAttempts)
+M.stopPreload('test')
+world.scrollTop = 0
 
 // --- Gates ---------------------------------------------------------------
 M.resetPreload()
@@ -310,11 +335,12 @@ M.flushDiag(true)
 check('flushDiag includes enhanced diagnostic fields',
   diagWrites.length === 1 &&
   diagWrites[0].feedDiag &&
-  // Verify new fields are present
   typeof diagWrites[0].feedDiag.totalScans === 'number' &&
   typeof diagWrites[0].feedDiag.totalCardsScanned === 'number' &&
+  typeof diagWrites[0].feedDiag.bufferScreens === 'number' &&
   typeof diagWrites[0].feedDiag.isIntersectionObserverBuild === 'boolean' &&
-  typeof diagWrites[0].feedDiag.continuationSentinelPresent === 'boolean',
+  typeof diagWrites[0].feedDiag.continuationSentinelPresent === 'boolean' &&
+  typeof diagWrites[0].feedDiag.preloadSetting === 'boolean',
   'missing enhanced fields')
 
 // Additional check for strategy tracking

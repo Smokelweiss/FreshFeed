@@ -1110,9 +1110,12 @@ diag.pendingCardsAtScan = pendingCards.size;
     return document.querySelector(feedSentinelSelector()) || null;
   }
 
-  // Strategy 1 - invisible wake-up for IntersectionObserver builds: pull the
-  // sentinel into the viewport with a transform and restore it on the next
-  // frame. The user's scroll position and the layout never change.
+  // Invisible wake-up for IntersectionObserver builds: move the continuation
+  // sentinel into the viewport with a CSS transform (compositor-only, no
+  // layout change, no page scroll) and restore it a moment later. The sentinel
+  // is hidden while displaced so even the brief overlap is invisible. This is
+  // the ONLY strategy: we never scroll the page, because a real scroll is
+  // visible to the user and that is exactly what we must avoid.
 function nudgeNativeContinuation() {
   const sentinel = findFeedSentinel();
   if (!sentinel) {
@@ -1120,52 +1123,33 @@ function nudgeNativeContinuation() {
     return false;
   }
   diag.preloadHook = "sentinel";
-  const previous = sentinel.style.transform;
+  const previousTransform = sentinel.style.transform;
+  const previousVisibility = sentinel.style.visibility;
+  const previousOpacity = sentinel.style.opacity;
+  let restore = null;
   try {
-    sentinel.style.transform = "translateY(-100vh)";
+    // Bring the sentinel to the middle of the viewport, wherever it currently
+    // is. translateY(-100vh) was not enough for a sentinel at the bottom of a
+    // long feed, which is why the old nudge silently failed and the code fell
+    // through to a visible scroll.
+    const rect = sentinel.getBoundingClientRect();
+    const delta = (window.innerHeight / 2) - (rect.top + rect.height / 2);
+    sentinel.style.transform = "translateY(" + Math.round(delta) + "px)";
+    // Hide it while it sits in the viewport so the user sees nothing at all.
+    sentinel.style.visibility = "hidden";
+    sentinel.style.opacity = "0";
   } catch (error) {
     return false;
   }
-  window.requestAnimationFrame(() => {
-    sentinel.style.transform = previous;
-  });
-  return true;
-}
-
-  // Strategy 2 - real near-bottom scroll for scroll-listener builds. The
-  // viewport lands on the load zone for a single frame: the restore happens in
-  // the scroll event itself (with an 80 ms safety net so the user is never
-  // left at the bottom), by which time YouTube's own handler has already read
-  // the position and fired its request.
-function scrollWake() {
-  const doc = document.scrollingElement || document.documentElement;
-  if (!doc || doc.scrollHeight <= 0) {
-    diag.preloadHook = "none";
-    return false;
-  }
-  const max = Math.max(0, doc.scrollHeight - window.innerHeight - PRELOAD.scrollMargin);
-  const beforeScroll = doc.scrollTop;
-  if (max === beforeScroll) {
-    diag.preloadHook = "none";
-    return false;
-  }
-  const restore = () => {
-    window.removeEventListener("scroll", restore);
-    if (doc.scrollTop !== beforeScroll) doc.scrollTop = beforeScroll;
+  restore = () => {
+    sentinel.style.transform = previousTransform;
+    sentinel.style.visibility = previousVisibility;
+    sentinel.style.opacity = previousOpacity;
   };
-  window.addEventListener("scroll", restore);
-  window.setTimeout(() => {
-    window.removeEventListener("scroll", restore);
-    if (doc.scrollTop !== beforeScroll) doc.scrollTop = beforeScroll;
-  }, 80);
-  try {
-    doc.scrollTop = max;
-    diag.preloadHook = "scroll";
-  } catch (error) {
-    restore();
-    diag.preloadHook = "none";
-    return false;
-  }
+  // Restore on the next frame (normal case) and again after 150 ms as a safety
+  // net, so the sentinel can never be left displaced and invisible.
+  window.requestAnimationFrame(restore);
+  window.setTimeout(restore, 150);
   return true;
 }
 
@@ -1242,37 +1226,25 @@ diag.lastRoundDuration = Date.now() - roundStart;
       ? (sentinel.tagName || "element").toLowerCase() + (sentinel.id ? "#" + sentinel.id : "")
       : "none";
 
-    // Give the invisible strategy a couple of rounds before moving on.
-    if (sentinel && diag.preloadDeadRounds < 2) {
+    // Only one strategy exists and it is invisible: nudge the continuation
+    // sentinel. Never scroll the page — a visible jump is the whole thing we
+    // are trying to avoid. If this build has no sentinel there is nothing to
+    // wake, so just wait quietly; the loop retries on its own.
+    if (sentinel) {
       diag.nudgeAttempts = (diag.nudgeAttempts || 0) + 1;
       if (nudgeNativeContinuation()) {
         waitForPreloadGrowth("nudge");
         return;
       }
-    }
-
-    // Either this build has no sentinel (scroll-listener grid) or the nudge
-    // has repeatedly delivered nothing. Wake it with a real one-frame scroll --
-    // but never fight the user: only reach for the scroll when they are at or
-    // near the top, so a mid-scroll page is never yanked.
-    const doc = document.scrollingElement || document.documentElement;
-    const userNearTop = !doc || doc.scrollTop < window.innerHeight * 2;
-    if (userNearTop && scrollWake()) {
-      diag.scrollAttempts = (diag.scrollAttempts || 0) + 1;
-      waitForPreloadGrowth("scroll");
+      // Sentinel was found but could not be nudged (e.g. no bounding rect).
+      // Retry next tick rather than pausing: it is not evidence the feed is dead.
+      armPreloadTimer(PRELOAD.tickMs);
       return;
     }
-
-    // Nothing to wake at all: no sentinel and no scroll space. Say so once and
-    // pause; the loop still retries later on its own.
-    // If sentinel exists but nudge failed, keep trying (don't count as dead).
-    if (!sentinel) {
-      diag.preloadDeadRounds = PRELOAD.maxDeadRounds;
-      stopPreload("no continuation sentinel and no scroll buffer to wake");
-    } else {
-      // Sentinel exists but nudge didn't trigger growth this round — retry next tick.
-      armPreloadTimer(PRELOAD.tickMs);
-    }
+    // No continuation sentinel at all: nothing can be woken invisibly. Say so
+    // and wait; the loop still retries later on its own.
+    diag.preloadDeadRounds = Math.min(diag.preloadDeadRounds + 1, PRELOAD.maxDeadRounds);
+    armPreloadTimer(diag.preloadDeadRounds >= PRELOAD.maxDeadRounds ? PRELOAD.pauseAfterDeadMs : PRELOAD.tickMs);
   }
 
   function startPreload() {
