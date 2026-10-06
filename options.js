@@ -298,20 +298,22 @@
     lines.push("  active             : " + yes(d.preloadActive) + (d.preloadGate ? "   ← " + d.preloadGate : ""));
     lines.push("  setting            : " + yes(d.preloadSetting));
     lines.push("  hook found         : " + (d.preloadHook || "?") +
+      (d.preloadHookTag ? "  <" + d.preloadHookTag + ">" : "") +
       (d.preloadHook === "sentinel"
         ? "   (sentinel present - preload can grow the feed)"
         : d.preloadHook === "none"
           ? "   (no continuation sentinel - nothing to wake)"
-          : d.preloadHook.startsWith("ytd-continuation-item-renderer")
-            ? "   (sentinel found but nudge didn't grow this round)"
-            : ""));
+          : ""));
     lines.push("  rounds run         : " + (d.preloadRounds || 0));
     lines.push("  pages that grew    : " + (d.preloadGrowth || 0));
     lines.push("  dead rounds        : " + (d.preloadDeadRounds || 0));
     lines.push("  last strategy      : " + (d.preloadStrategy || "none"));
     lines.push("  nudge: " + (d.nudgeAttempts || 0) + " attempts, " + (d.nudgeSuccesses || 0) + " grew the feed");
     lines.push("  buffer screens     : " + (d.bufferScreens != null ? d.bufferScreens.toFixed(1) : "?"));
-    lines.push("  page moved by preload: never (preload only nudges the sentinel, it never scrolls)");
+    const drift = Number(d.preloadScrollDriftPx) || 0;
+    lines.push("  page moved by preload: " + (drift > 0
+      ? drift.toFixed(0) + "px of scroll drift measured across all nudge windows"
+      : "0px - measured over every nudge window, not assumed"));
     lines.push("");
     lines.push("Subscription sync");
     lines.push("  channels           : " + (d.syncChannels || 0));

@@ -37,7 +37,7 @@ function makeEl(tag, opts = {}) {
     offsetParent: opts.hidden ? null : {},
     _matches: opts.matches || [],
     _children: opts.children || [],
-    style: { transform: '' },
+    style: { transform: '', opacity: '' },
     matches(sel) { return this._matches.includes(sel) },
     querySelectorAll(sel) { return this._children.filter((c) => c._matches.includes(sel)) },
     querySelector(sel) { return this.querySelectorAll(sel)[0] || null },
@@ -145,6 +145,7 @@ M.PRELOAD.targetScreens = 3
 M.PRELOAD.maxDeadRounds = 5
 M.PRELOAD.largeBufferWaitMs = 10
 M.PRELOAD.growthRetryMs = 10
+M.PRELOAD.nudgeHoldMs = 20
 
 async function advance(ms) {
   const end = Date.now() + ms
@@ -175,7 +176,10 @@ function check(name, cond, detail) {
 check('PRELOAD defaults are sane',
   shippingPreload.enabled === true && shippingPreload.tickMs >= 200 &&
   shippingPreload.settleMs >= 1000 && shippingPreload.targetScreens >= 2 &&
-  shippingPreload.maxDeadRounds >= 5 && shippingPreload.pauseAfterDeadMs >= 5000,
+  shippingPreload.maxDeadRounds >= 5 && shippingPreload.pauseAfterDeadMs >= 5000 &&
+  // nudgeHoldMs must exceed one frame (~16 ms) or IntersectionObserver never
+  // sees the displaced sentinel - see the regression test below.
+  shippingPreload.nudgeHoldMs >= 100,
   JSON.stringify(shippingPreload))
 
 // --- Feed item counting ----------------------------------------------------
@@ -199,12 +203,26 @@ world.sentinel = sentinelEl
 check('nudge translates the sentinel into the viewport without scrolling the page',
   M.nudgeNativeContinuation() === true &&
     /^translateY\(-?\d+px\)$/.test(sentinelEl.style.transform) &&
-    world.scrollTop === 0 && M.diag.preloadHook === 'sentinel',
-  'transform=' + sentinelEl.style.transform + ' hook=' + M.diag.preloadHook)
+    sentinelEl.style.opacity === '0' &&
+    world.scrollTop === 0 && M.diag.preloadHook === 'sentinel' &&
+    M.diag.preloadHookTag === 'ytd-continuation-item-renderer',
+  'transform=' + sentinelEl.style.transform + ' opacity=' + sentinelEl.style.opacity +
+    ' hook=' + M.diag.preloadHook + ' tag=' + M.diag.preloadHookTag)
+
+// Regression for the rAF-restore bug: the displacement must survive at least one
+// full frame. IntersectionObserver computes intersections during the frame's
+// render step, which runs AFTER rAF callbacks, so restoring inside rAF undid the
+// displacement before the observer could ever see the sentinel in the viewport.
+// That is why only about half the nudges used to register.
+await advance(5)
+check('nudge holds the displacement across frames instead of restoring in rAF',
+  /^translateY\(-?\d+px\)$/.test(sentinelEl.style.transform) && sentinelEl.style.opacity === '0',
+  'transform=' + sentinelEl.style.transform + ' opacity=' + sentinelEl.style.opacity)
 await advance(40)
-check('nudge restores the transform on the next frame',
-  sentinelEl.style.transform === '',
-  'transform=' + JSON.stringify(sentinelEl.style.transform))
+check('nudge restores the transform and opacity after the hold',
+  sentinelEl.style.transform === '' && sentinelEl.style.opacity === '',
+  'transform=' + JSON.stringify(sentinelEl.style.transform) +
+    ' opacity=' + JSON.stringify(sentinelEl.style.opacity))
 
 world.sentinel = null
 M.diag.preloadHook = ''
@@ -239,6 +257,32 @@ check('preload never fell back to the removed scroll strategy',
   'scrollAttempts=' + M.diag.scrollAttempts)
 M.stopPreload('test')
 world.scrollTop = 0
+M.resetPreload()
+// Drain the drift timers left over from the rounds above. They fire late and
+// would otherwise attribute this scrollTop reset to the last nudge of the test.
+await advance(500)
+M.diag.preloadScrollDriftPx = 0
+
+// The "page never moved" claim must be measured, not asserted. Run a nudge and
+// confirm the drift counter stays at zero, then simulate a scroll and confirm it
+// is reported honestly instead of hidden behind a hardcoded "never".
+world.sentinel = sentinelEl
+world.scrollTop = 0
+M.nudgeNativeContinuation()
+await advance(200)
+check('nudge measures zero scroll drift when the page does not move',
+  (M.diag.preloadScrollDriftPx || 0) === 0,
+  'drift=' + M.diag.preloadScrollDriftPx)
+world.scrollTop = 0
+M.diag.preloadScrollDriftPx = 0
+M.nudgeNativeContinuation() // captures scrollTopBefore = 0
+world.scrollTop = 300       // a scroll that happens DURING the hold window
+await advance(200)
+check('nudge reports real scroll drift instead of assuming "never"',
+  (M.diag.preloadScrollDriftPx || 0) === 300,
+  'drift=' + M.diag.preloadScrollDriftPx)
+world.scrollTop = 0
+M.resetPreload()
 
 // --- Gates ---------------------------------------------------------------
 M.resetPreload()
@@ -336,7 +380,9 @@ check('flushDiag includes enhanced diagnostic fields',
   typeof diagWrites[0].feedDiag.bufferScreens === 'number' &&
   typeof diagWrites[0].feedDiag.isIntersectionObserverBuild === 'boolean' &&
   typeof diagWrites[0].feedDiag.continuationSentinelPresent === 'boolean' &&
-  typeof diagWrites[0].feedDiag.preloadSetting === 'boolean',
+  typeof diagWrites[0].feedDiag.preloadSetting === 'boolean' &&
+  typeof diagWrites[0].feedDiag.preloadScrollDriftPx === 'number' &&
+  typeof diagWrites[0].feedDiag.preloadHookTag === 'string',
   'missing enhanced fields')
 
 // Additional check for strategy tracking

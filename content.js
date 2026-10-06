@@ -1029,12 +1029,12 @@ diag.pendingCardsAtScan = pendingCards.size;
     // How much feed to keep beyond the fold (in viewport heights). When this
     // much is already buffered, the loop waits instead of loading pages the
     // user cannot reach yet.
-    targetScreens: 5,
+    targetScreens: 8,
     // How long one round waits for YouTube to actually append a page.
     // Short on purpose: a slow response must not be mistaken for a dead end,
-    // but 3 s left the buffer starved while the user was scrolling.
-    settleMs: 1200,
-    settlePollMs: 150,
+    // but a long wait starves the buffer while the user is scrolling.
+    settleMs: 1000,
+    settlePollMs: 120,
     // Rounds that grow nothing before the loop changes strategy or pauses.
     // Reaching the max pauses quietly for a while and retries later; the loop
     // never shuts itself off for good.
@@ -1047,9 +1047,14 @@ diag.pendingCardsAtScan = pendingCards.size;
     // How long to wait when the buffer is large (in ms).
     largeBufferWaitMs: 5000,
     // How long to wait after a successful growth before trying again (in ms).
-    // Short: each page takes ~1-2 s from YouTube, so the next nudge should
-    // start almost immediately after growth is confirmed.
-    growthRetryMs: 80
+    // Long enough for YouTube to finish attaching the NEW sentinel, so the next
+    // nudge targets the right element instead of the one being replaced.
+    growthRetryMs: 250,
+    // How long the sentinel stays displaced (and invisible) during a nudge.
+    // Must span several frames: IntersectionObserver computes intersections
+    // during the frame's render step, after rAF callbacks, so a one-frame hold
+    // was undone before the observer could see the sentinel in the viewport.
+    nudgeHoldMs: 300
   };
 
   // The preload health lives on the diag snapshot (preloadActive/...), so the
@@ -1070,7 +1075,9 @@ diag.pendingCardsAtScan = pendingCards.size;
     diag.preloadDeadRounds = 0;
     diag.preloadGrowth = 0;
     diag.preloadHook = "";
+    diag.preloadHookTag = "";
     diag.preloadStrategy = "";
+    diag.preloadScrollDriftPx = 0;
     lastGrowStrategy = "";
     if (preloadTimer) {
       clearTimeout(preloadTimer);
@@ -1115,43 +1122,74 @@ diag.pendingCardsAtScan = pendingCards.size;
   }
 
   // Invisible wake-up for IntersectionObserver builds: move the continuation
-  // sentinel into the viewport with a CSS transform (compositor-only, no
-  // layout change, no page scroll) and restore it on the next frame. This is
-  // the ONLY strategy: we never scroll the page, because a real scroll is
-  // visible to the user and that is exactly what we must avoid.
+  // sentinel into the viewport with a CSS transform (compositor-only, no layout
+  // change, no page scroll) and restore it after a short hold. This is the ONLY
+  // strategy: we never scroll the page, because a real scroll is visible to the
+  // user and that is exactly what we must avoid.
   //
-  // NOTE: the sentinel is NOT hidden with visibility/opacity. Hiding it risks
-  // breaking IntersectionObserver, which watches the element itself, not a
-  // snapshot. The displacement lasts less than one frame (~16 ms) so there is
-  // nothing to see.
-function nudgeNativeContinuation() {
-  const sentinel = findFeedSentinel();
-  if (!sentinel) {
-    diag.preloadHook = "none";
-    return false;
+  // Two things must be right for this to work, and both were wrong before:
+  //
+  // 1. The displacement must survive at least one FULL frame. IntersectionObserver
+  //    computes intersections during the frame's render step, which runs AFTER
+  //    rAF callbacks. Restoring inside rAF therefore undid the displacement before
+  //    the observer had ever seen the sentinel in the viewport, which is why only
+  //    about half the nudges registered. We hold it for nudgeHoldMs instead.
+  //
+  // 2. The sentinel must be invisible while displaced, otherwise the user sees a
+  //    ghost card appear mid-screen for a few frames. opacity:0 is safe here: it
+  //    is a paint-layer property that does not change the bounding rect, so the
+  //    observer still sees the element intersecting. (display:none would have been
+  //    wrong - it removes the rect entirely and the observer would never fire.)
+  function nudgeNativeContinuation() {
+    const sentinel = findFeedSentinel();
+    if (!sentinel) {
+      diag.preloadHook = "none";
+      return false;
+    }
+    diag.preloadHook = "sentinel";
+    diag.preloadHookTag = (sentinel.tagName || "element").toLowerCase()
+      + (sentinel.id ? "#" + sentinel.id : "");
+    const previousTransform = sentinel.style.transform;
+    const previousOpacity = sentinel.style.opacity;
+    let restored = false;
+    try {
+      // Bring the sentinel to the middle of the viewport, wherever it currently
+      // is. translateY(-100vh) was not enough for a sentinel at the bottom of a
+      // long feed, which is why the old nudge silently failed.
+      const rect = sentinel.getBoundingClientRect();
+      const delta = Math.round((window.innerHeight / 2) - (rect.top + rect.height / 2));
+      sentinel.style.opacity = "0";
+      sentinel.style.transform = "translateY(" + delta + "px)";
+    } catch (error) {
+      return false;
+    }
+    // Prove the preload never moved the page: measure scrollTop drift across the
+    // whole hold window. A transform cannot change scroll position, so any drift
+    // here is the user's or YouTube's, not ours.
+    const scrollEl = document.scrollingElement || document.documentElement;
+    const scrollTopBefore = scrollEl ? scrollEl.scrollTop : 0;
+    window.setTimeout(() => {
+      if (scrollEl) {
+        diag.preloadScrollDriftPx = (diag.preloadScrollDriftPx || 0)
+          + Math.abs(scrollEl.scrollTop - scrollTopBefore);
+      }
+    }, PRELOAD.nudgeHoldMs + 50);
+    // Restore the moment the hold expires, and only if YouTube did not already
+    // replace the node while we were holding it.
+    window.setTimeout(() => {
+      if (restored) return;
+      restored = true;
+      try {
+        if (sentinel.isConnected) {
+          sentinel.style.transform = previousTransform;
+          sentinel.style.opacity = previousOpacity;
+        }
+      } catch (error) {
+        // The node was removed while we held it; there is nothing to restore.
+      }
+    }, PRELOAD.nudgeHoldMs);
+    return true;
   }
-  diag.preloadHook = "sentinel";
-  const previousTransform = sentinel.style.transform;
-  let restore = null;
-  try {
-    // Bring the sentinel to the middle of the viewport, wherever it currently
-    // is. translateY(-100vh) was not enough for a sentinel at the bottom of a
-    // long feed, which is why the old nudge silently failed.
-    const rect = sentinel.getBoundingClientRect();
-    const delta = (window.innerHeight / 2) - (rect.top + rect.height / 2);
-    sentinel.style.transform = "translateY(" + Math.round(delta) + "px)";
-  } catch (error) {
-    return false;
-  }
-  restore = () => {
-    sentinel.style.transform = previousTransform;
-  };
-  // Restore on the next frame (normal case) and again after 150 ms as a safety
-  // net, so the sentinel can never be left displaced.
-  window.requestAnimationFrame(restore);
-  window.setTimeout(restore, 150);
-  return true;
-}
 
   function preloadScreensPending() {
     const doc = document.scrollingElement || document.documentElement;
@@ -1222,9 +1260,10 @@ diag.preloadRounds += 1;
 diag.lastRoundDuration = Date.now() - roundStart;
 
     const sentinel = findFeedSentinel();
-    diag.preloadHook = sentinel
+    diag.preloadHookTag = sentinel
       ? (sentinel.tagName || "element").toLowerCase() + (sentinel.id ? "#" + sentinel.id : "")
       : "none";
+    diag.preloadHook = sentinel ? "sentinel" : "none";
 
     // Only one strategy exists and it is invisible: nudge the continuation
     // sentinel. Never scroll the page — a visible jump is the whole thing we
@@ -1289,10 +1328,15 @@ diag.lastRoundDuration = Date.now() - roundStart;
   preloadDeadRounds: 0,
   preloadGrowth: 0,
   preloadHook: "",
+  preloadHookTag: "",
   preloadStrategy: "",
   preloadGate: "",
   lastGrowStrategy: "",
   preloadTimer: null,
+  // Total |scrollTop| drift observed across nudge hold windows. A CSS transform
+  // cannot change scroll position, so this is the honest proof that the preload
+  // never moves the page instead of a hardcoded "never".
+  preloadScrollDriftPx: 0,
   // Strategy attempts and results
   nudgeAttempts: 0,
   nudgeSuccesses: 0,
