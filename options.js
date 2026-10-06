@@ -328,9 +328,17 @@
     enabledControl.checked = data.enabled !== false;
     Object.entries(settingControls).forEach(([key, control]) => { control.checked = settings[key] === true; });
     Object.entries(numericControls).forEach(([key, control]) => {
+      // Do not re-fill a field the user is actively editing; a refresh racing
+      // the write could snap it back to the stored (pre-write) value.
+      if (control === document.activeElement) return;
       control.value = Number(settings[key]) || (key.includes("Min") ? 1 : key.includes("Date") ? 30 : 60);
     });
-    Object.entries(selectControls).forEach(([key, control]) => { control.value = settings[key]; });
+    Object.entries(selectControls).forEach(([key, control]) => {
+      // Same guard for the mode dropdowns: never revert one the user just
+      // opened/clicked while storage is being re-read.
+      if (control === document.activeElement) return;
+      control.value = settings[key];
+    });
     const uploadDateOptions = document.getElementById("upload-date-options");
     const durationOptions = document.getElementById("duration-options");
     uploadDateOptions.hidden = !settings.filterUploadDate;
@@ -497,13 +505,13 @@
     await refresh();
   }
 
-  Object.entries(settingControls).forEach(([key, control]) => control.addEventListener("change", () => browser.storage.local.set({ [key]: control.checked }).then(refresh)));
+  Object.entries(settingControls).forEach(([key, control]) => control.addEventListener("change", () => browser.storage.local.set({ [key]: control.checked })));
   Object.entries(numericControls).forEach(([key, control]) => control.addEventListener("change", () => {
     const value = Math.max(Number(control.min), Math.min(Number(control.max), Number(control.value) || Number(control.min)));
     control.value = value;
-    browser.storage.local.set({ [key]: value }).then(refresh);
+    browser.storage.local.set({ [key]: value });
   }));
-  Object.entries(selectControls).forEach(([key, control]) => control.addEventListener("change", () => browser.storage.local.set({ [key]: control.value }).then(refresh)));
+  Object.entries(selectControls).forEach(([key, control]) => control.addEventListener("change", () => browser.storage.local.set({ [key]: control.value })));
   sync.addEventListener("click", async () => {
     // Queue the sync for the background worker. Never open or switch tabs: the
     // user asked for a sync, not for their browser to be moved around.

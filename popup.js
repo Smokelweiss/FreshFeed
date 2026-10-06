@@ -104,9 +104,15 @@
     // popup's state readable at a glance.
     document.body.classList.toggle("disabled", !enabledControl.checked);
     Object.entries(numericControls).forEach(([key, control]) => {
+      // Never stomp the field the user is actively editing; another refresh
+      // racing the write could otherwise snap it back to the stored value.
+      if (control === document.activeElement) return;
       control.value = Number(settings[key]) || (key.includes("Min") ? 1 : key.includes("Date") ? 30 : 60);
     });
     Object.entries(selectControls).forEach(([key, control]) => {
+      // Same guard: a mode dropdown the user just opened/clicked must not be
+      // reverted while we re-read storage.
+      if (control === document.activeElement) return;
       control.value = settings[key];
     });
     uploadDateOptions.hidden = !settings.filterUploadDate;
@@ -138,19 +144,19 @@
   }
 
   Object.entries(settingControls).forEach(([key, control]) => {
-    control.addEventListener("change", () => browser.storage.local.set({ [key]: control.checked }).then(refresh));
+    control.addEventListener("change", () => browser.storage.local.set({ [key]: control.checked }));
   });
   Object.entries(numericControls).forEach(([key, control]) => {
     control.addEventListener("change", () => {
       const value = Math.max(Number(control.min), Math.min(Number(control.max), Number(control.value) || Number(control.min)));
       control.value = value;
-      browser.storage.local.set({ [key]: value }).then(refresh);
+      browser.storage.local.set({ [key]: value });
     });
   });
   Object.entries(selectControls).forEach(([key, control]) => {
-    control.addEventListener("change", () => browser.storage.local.set({ [key]: control.value }).then(refresh));
+    control.addEventListener("change", () => browser.storage.local.set({ [key]: control.value }));
   });
-  enabledControl.addEventListener("change", () => browser.storage.local.set({ enabled: enabledControl.checked }).then(refresh));
+  enabledControl.addEventListener("change", () => browser.storage.local.set({ enabled: enabledControl.checked }));
   allTrash.addEventListener("change", () => {
     // Bulk action, not a toggle: flip every trash setting to match the switch.
     const patch = {};
