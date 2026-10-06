@@ -1112,10 +1112,14 @@ diag.pendingCardsAtScan = pendingCards.size;
 
   // Invisible wake-up for IntersectionObserver builds: move the continuation
   // sentinel into the viewport with a CSS transform (compositor-only, no
-  // layout change, no page scroll) and restore it a moment later. The sentinel
-  // is hidden while displaced so even the brief overlap is invisible. This is
+  // layout change, no page scroll) and restore it on the next frame. This is
   // the ONLY strategy: we never scroll the page, because a real scroll is
   // visible to the user and that is exactly what we must avoid.
+  //
+  // NOTE: the sentinel is NOT hidden with visibility/opacity. Hiding it risks
+  // breaking IntersectionObserver, which watches the element itself, not a
+  // snapshot. The displacement lasts less than one frame (~16 ms) so there is
+  // nothing to see.
 function nudgeNativeContinuation() {
   const sentinel = findFeedSentinel();
   if (!sentinel) {
@@ -1124,30 +1128,22 @@ function nudgeNativeContinuation() {
   }
   diag.preloadHook = "sentinel";
   const previousTransform = sentinel.style.transform;
-  const previousVisibility = sentinel.style.visibility;
-  const previousOpacity = sentinel.style.opacity;
   let restore = null;
   try {
     // Bring the sentinel to the middle of the viewport, wherever it currently
     // is. translateY(-100vh) was not enough for a sentinel at the bottom of a
-    // long feed, which is why the old nudge silently failed and the code fell
-    // through to a visible scroll.
+    // long feed, which is why the old nudge silently failed.
     const rect = sentinel.getBoundingClientRect();
     const delta = (window.innerHeight / 2) - (rect.top + rect.height / 2);
     sentinel.style.transform = "translateY(" + Math.round(delta) + "px)";
-    // Hide it while it sits in the viewport so the user sees nothing at all.
-    sentinel.style.visibility = "hidden";
-    sentinel.style.opacity = "0";
   } catch (error) {
     return false;
   }
   restore = () => {
     sentinel.style.transform = previousTransform;
-    sentinel.style.visibility = previousVisibility;
-    sentinel.style.opacity = previousOpacity;
   };
   // Restore on the next frame (normal case) and again after 150 ms as a safety
-  // net, so the sentinel can never be left displaced and invisible.
+  // net, so the sentinel can never be left displaced.
   window.requestAnimationFrame(restore);
   window.setTimeout(restore, 150);
   return true;

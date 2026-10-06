@@ -199,16 +199,12 @@ world.sentinel = sentinelEl
 check('nudge translates the sentinel into the viewport without scrolling the page',
   M.nudgeNativeContinuation() === true &&
     /^translateY\(-?\d+px\)$/.test(sentinelEl.style.transform) &&
-    sentinelEl.style.visibility === 'hidden' &&
-    sentinelEl.style.opacity === '0' &&
     world.scrollTop === 0 && M.diag.preloadHook === 'sentinel',
-  'transform=' + sentinelEl.style.transform + ' vis=' + sentinelEl.style.visibility + ' hook=' + M.diag.preloadHook)
+  'transform=' + sentinelEl.style.transform + ' hook=' + M.diag.preloadHook)
 await advance(40)
-check('nudge restores the transform and visibility on the next frame',
-  sentinelEl.style.transform === '' &&
-    sentinelEl.style.visibility !== 'hidden' &&
-    sentinelEl.style.opacity !== '0',
-  'transform=' + JSON.stringify(sentinelEl.style.transform) + ' vis=' + JSON.stringify(sentinelEl.style.visibility) + ' opacity=' + JSON.stringify(sentinelEl.style.opacity))
+check('nudge restores the transform on the next frame',
+  sentinelEl.style.transform === '',
+  'transform=' + JSON.stringify(sentinelEl.style.transform))
 
 world.sentinel = null
 M.diag.preloadHook = ''
