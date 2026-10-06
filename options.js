@@ -306,7 +306,7 @@
           : ""));
     lines.push("  rounds run         : " + (d.preloadRounds || 0));
     lines.push("  pages that grew    : " + (d.preloadGrowth || 0));
-    lines.push("  dead rounds        : " + (d.preloadDeadRounds || 0));
+    lines.push("  dead rounds        : " + (d.preloadDeadRounds || 0) + (d.preloadExhausted ? "  → feed loaded to the end (exhausted)" : ""));
     lines.push("  last strategy      : " + (d.preloadStrategy || "none"));
     lines.push("  nudge: " + (d.nudgeAttempts || 0) + " attempts, " + (d.nudgeSuccesses || 0) + " grew the feed");
     lines.push("  buffer screens     : " + (d.bufferScreens != null ? d.bufferScreens.toFixed(1) : "?"));

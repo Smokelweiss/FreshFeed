@@ -1025,31 +1025,31 @@ diag.pendingCardsAtScan = pendingCards.size;
     enabled: true,
     // Tick of the self-sustaining timer; also the minimum gap between rounds,
     // so the loop can never free-run faster than a human could scroll.
-    tickMs: 400,
+    tickMs: 120,
     // How much feed to keep beyond the fold (in viewport heights). When this
     // much is already buffered, the loop waits instead of loading pages the
     // user cannot reach yet.
-    targetScreens: 8,
+    targetScreens: 60,
     // How long one round waits for YouTube to actually append a page.
     // Short on purpose: a slow response must not be mistaken for a dead end,
     // but a long wait starves the buffer while the user is scrolling.
-    settleMs: 1000,
-    settlePollMs: 120,
+    settleMs: 400,
+    settlePollMs: 80,
     // Rounds that grow nothing before the loop changes strategy or pauses.
-    // Reaching the max pauses quietly for a while and retries later; the loop
-    // never shuts itself off for good.
-    maxDeadRounds: 10,
-    pauseAfterDeadMs: 8000,
+    // Reaching the max counts the feed as exhausted: there is nothing more to
+    // grow, so the natural end is reached instead of an arbitrary depth.
+    maxDeadRounds: 4,
+    pauseAfterDeadMs: 2500,
     // Distance from the absolute bottom (px) used by the real-scroll wake-up.
     // The exact value does not matter: the scroll listener fires on any scroll
     // and recomputes scrollY for itself.
     scrollMargin: 200,
     // How long to wait when the buffer is large (in ms).
-    largeBufferWaitMs: 5000,
+    largeBufferWaitMs: 6000,
     // How long to wait after a successful growth before trying again (in ms).
     // Long enough for YouTube to finish attaching the NEW sentinel, so the next
     // nudge targets the right element instead of the one being replaced.
-    growthRetryMs: 250,
+    growthRetryMs: 150,
     // How long the sentinel stays displaced (and invisible) during a nudge.
     // Must span several frames: IntersectionObserver computes intersections
     // during the frame's render step, after rAF callbacks, so a one-frame hold
@@ -1078,6 +1078,7 @@ diag.pendingCardsAtScan = pendingCards.size;
     diag.preloadHookTag = "";
     diag.preloadStrategy = "";
     diag.preloadScrollDriftPx = 0;
+    diag.preloadExhausted = false;
     lastGrowStrategy = "";
     if (preloadTimer) {
       clearTimeout(preloadTimer);
@@ -1229,6 +1230,9 @@ if (feedItemCount() > before) {
       }
       if (checked * PRELOAD.settlePollMs >= PRELOAD.settleMs) {
         diag.preloadDeadRounds += 1;
+        if (diag.preloadDeadRounds >= PRELOAD.maxDeadRounds) {
+          diag.preloadExhausted = true;
+        }
         armPreloadTimer(
           diag.preloadDeadRounds >= PRELOAD.maxDeadRounds ? PRELOAD.pauseAfterDeadMs : undefined
         );
@@ -1249,9 +1253,10 @@ if (feedItemCount() > before) {
       stopPreload("not the home feed");
       return;
     }
-    // Enough content already buffered below the fold: wait instead of loading
-    // pages the user cannot reach yet.
-    if (preloadScreensPending() >= PRELOAD.targetScreens) {
+    // Enough content already buffered beyond the fold and we have already
+    // reached the natural end of the feed: wait quietly. A new user scroll may
+    // change the buffer; the loop re-checks on its own.
+    if (diag.preloadExhausted && preloadScreensPending() >= PRELOAD.targetScreens) {
       armPreloadTimer(PRELOAD.largeBufferWaitMs);
       return;
     }
@@ -1337,6 +1342,10 @@ diag.lastRoundDuration = Date.now() - roundStart;
   // cannot change scroll position, so this is the honest proof that the preload
   // never moves the page instead of a hardcoded "never".
   preloadScrollDriftPx: 0,
+  // True when a burst of dead rounds confirms the feed is exhausted. Diagnostics
+  // can then show "loaded to the end" instead of looking like the loop just
+  // stopped or was paused for no reason.
+  preloadExhausted: false,
   // Strategy attempts and results
   nudgeAttempts: 0,
   nudgeSuccesses: 0,

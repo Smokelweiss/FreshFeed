@@ -174,9 +174,9 @@ function check(name, cond, detail) {
 
 // --- Config sanity ---------------------------------------------------------
 check('PRELOAD defaults are sane',
-  shippingPreload.enabled === true && shippingPreload.tickMs >= 200 &&
-  shippingPreload.settleMs >= 1000 && shippingPreload.targetScreens >= 2 &&
-  shippingPreload.maxDeadRounds >= 5 && shippingPreload.pauseAfterDeadMs >= 5000 &&
+  shippingPreload.enabled === true && shippingPreload.tickMs >= 100 &&
+  shippingPreload.settleMs >= 300 && shippingPreload.targetScreens >= 50 &&
+  shippingPreload.maxDeadRounds >= 3 && shippingPreload.pauseAfterDeadMs >= 1000 &&
   // nudgeHoldMs must exceed one frame (~16 ms) or IntersectionObserver never
   // sees the displaced sentinel - see the regression test below.
   shippingPreload.nudgeHoldMs >= 100,
@@ -330,22 +330,27 @@ check('a round that grew the feed clears the dead counter',
   'growth=' + M.diag.preloadGrowth + ' dead=' + M.diag.preloadDeadRounds)
 M.stopPreload('test'); // freeze the loop before later rounds re-accumulate
 
-// --- Dead rounds -> quiet pause --------------------------------------------
+// --- Dead rounds -> quiet pause + exhaustion --------------------------------
 M.resetPreload()
 world.cards = []
 M.startPreload()
 await advance(260)
 check('rounds that grow nothing are counted and reach a pause',
-  M.diag.preloadDeadRounds >= M.PRELOAD.maxDeadRounds,
-  'dead=' + M.diag.preloadDeadRounds + ' (max ' + M.PRELOAD.maxDeadRounds + ')')
+  M.diag.preloadDeadRounds >= M.PRELOAD.maxDeadRounds &&
+    M.diag.preloadExhausted === true,
+  'dead=' + M.diag.preloadDeadRounds + ' exhausted=' + M.diag.preloadExhausted +
+    ' (max ' + M.PRELOAD.maxDeadRounds + ')')
 
-// --- Buffer-thick hold -----------------------------------------------------
+// --- An unused buffer does NOT hold the loop before the feed is exhausted -----
+// Belongs to the current requirement: preload must keep growing the whole feed
+// out of sight, not stop after a shallow target. A large buffer is not a reason
+// to pause when there is still pagination to wake.
 M.resetPreload()
-world.scrollHeight = 9000 // 9 screens >= targetScreens
+world.scrollHeight = 9000 // 9 screens; well past the 3-screen test target
 M.startPreload()
 await advance(30)
-check('a full buffer holds the loop instead of loading more',
-  M.diag.preloadRounds === 0,
+check('a deep buffer does not hold the loop before the feed is exhausted',
+  M.diag.preloadRounds >= 1,
   'rounds=' + M.diag.preloadRounds)
 world.scrollHeight = 3000
 
