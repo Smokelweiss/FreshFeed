@@ -173,9 +173,9 @@ function check(name, cond, detail) {
 
 // --- Config sanity ---------------------------------------------------------
 check('PRELOAD defaults are sane',
-  shippingPreload.enabled === true && shippingPreload.tickMs >= 500 &&
-  shippingPreload.settleMs >= 2000 && shippingPreload.targetScreens >= 2 &&
-  shippingPreload.maxDeadRounds >= 5 && shippingPreload.pauseAfterDeadMs >= 10000,
+  shippingPreload.enabled === true && shippingPreload.tickMs >= 200 &&
+  shippingPreload.settleMs >= 1000 && shippingPreload.targetScreens >= 2 &&
+  shippingPreload.maxDeadRounds >= 5 && shippingPreload.pauseAfterDeadMs >= 5000,
   JSON.stringify(shippingPreload))
 
 // --- Feed item counting ----------------------------------------------------

@@ -1025,27 +1025,31 @@ diag.pendingCardsAtScan = pendingCards.size;
     enabled: true,
     // Tick of the self-sustaining timer; also the minimum gap between rounds,
     // so the loop can never free-run faster than a human could scroll.
-    tickMs: 800,
+    tickMs: 400,
     // How much feed to keep beyond the fold (in viewport heights). When this
     // much is already buffered, the loop waits instead of loading pages the
     // user cannot reach yet.
-    targetScreens: 3,
+    targetScreens: 5,
     // How long one round waits for YouTube to actually append a page.
-    settleMs: 3000,
-    settlePollMs: 200,
+    // Short on purpose: a slow response must not be mistaken for a dead end,
+    // but 3 s left the buffer starved while the user was scrolling.
+    settleMs: 1200,
+    settlePollMs: 150,
     // Rounds that grow nothing before the loop changes strategy or pauses.
     // Reaching the max pauses quietly for a while and retries later; the loop
     // never shuts itself off for good.
     maxDeadRounds: 10,
-    pauseAfterDeadMs: 15000,
+    pauseAfterDeadMs: 8000,
     // Distance from the absolute bottom (px) used by the real-scroll wake-up.
     // The exact value does not matter: the scroll listener fires on any scroll
     // and recomputes scrollY for itself.
     scrollMargin: 200,
     // How long to wait when the buffer is large (in ms).
-    largeBufferWaitMs: 10000,
+    largeBufferWaitMs: 5000,
     // How long to wait after a successful growth before trying again (in ms).
-    growthRetryMs: 300
+    // Short: each page takes ~1-2 s from YouTube, so the next nudge should
+    // start almost immediately after growth is confirmed.
+    growthRetryMs: 80
   };
 
   // The preload health lives on the diag snapshot (preloadActive/...), so the
