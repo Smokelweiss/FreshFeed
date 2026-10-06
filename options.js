@@ -16,6 +16,7 @@
     hideSurveys: document.getElementById("hide-surveys"),
     hideGeneratedShelves: document.getElementById("hide-generated-shelves"),
     bgPreload: document.getElementById("bg-preload"),
+    endlessFeed: document.getElementById("endless-feed"),
     filterUploadDate: document.getElementById("filter-upload-date"),
     filterDuration: document.getElementById("filter-duration")
   };
@@ -48,6 +49,7 @@
     hideSurveys: false,
     hideGeneratedShelves: false,
     bgPreload: true,
+    endlessFeed: false,
     filterUploadDate: false,
     uploadDateMode: "olderThan",
     uploadDateUnit: "days",
@@ -99,6 +101,7 @@
     hideSurveys: "Surveys & upsell popups",
     hideGeneratedShelves: "Generated topic shelves",
     bgPreload: "Background feed preload (loads ahead of your scroll)",
+    endlessFeed: "Endless feed (periodically generates new videos)",
     filterUploadDate: "Upload date",
     filterDuration: "Duration"
   };

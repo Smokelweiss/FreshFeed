@@ -116,6 +116,7 @@
     hideSurveys: false,
     hideGeneratedShelves: false,
     bgPreload: true,
+    endlessFeed: false,
     filterUploadDate: false,
     uploadDateMode: "olderThan",
     uploadDateUnit: "days",
@@ -227,6 +228,7 @@
     state.channels = normalizeChannelState(state.channels);
     state.blockedChannels = normalizeChannelState(state.blockedChannels);
     state.settings = normalizeSettings(state.settings);
+    PRELOAD.button.enabled = state.settings.endlessFeed === true;
     ids = new Set(state.channels.ids);
     handles = new Set(state.channels.handles);
     customUrls = new Set(state.channels.customUrls);
@@ -2729,6 +2731,7 @@ diag.lastRoundDuration = Date.now() - roundStart;
     state.channels = normalizeChannelState(saved.channels);
     state.blockedChannels = normalizeChannelState(saved.blockedChannels);
     state.settings = normalizeSettings(saved);
+    PRELOAD.button.enabled = state.settings.endlessFeed === true;
     state.syncedAt = saved.syncedAt || null;
     state.syncPending = Boolean(saved.syncPending);
     state.syncLock = saved.syncLock || null;

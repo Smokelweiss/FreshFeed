@@ -23,6 +23,7 @@
     hideSurveys: false,
     hideGeneratedShelves: false,
     bgPreload: true,
+    endlessFeed: false,
     filterUploadDate: false,
     uploadDateMode: "olderThan",
     uploadDateUnit: "days",
