@@ -115,6 +115,7 @@ globalThis.sessionStorage = {
   removeItem: (k) => { delete world.storage[k] }
 }
 globalThis.MutationObserver = class { observe() {} disconnect() {} }
+Object.defineProperty(globalThis, 'navigator', { value: { userAgent: 'test-agent' }, writable: true })
 
 const CARD_SELECTOR = 'ytd-rich-item-renderer'
 const isFilterSurface = () => world.pathname === '/'
@@ -142,6 +143,8 @@ M.PRELOAD.settleMs = 40
 M.PRELOAD.settlePollMs = 10
 M.PRELOAD.targetScreens = 6
 M.PRELOAD.maxDeadRounds = 3
+M.PRELOAD.largeBufferWaitMs = 10
+M.PRELOAD.growthRetryMs = 10
 
 async function advance(ms) {
   const end = Date.now() + ms
@@ -191,7 +194,7 @@ check('findFeedSentinel returns null when the grid has no sentinel',
   M.findFeedSentinel() === null,
   'got ' + M.findFeedSentinel())
 
-// --- Nudge (no-viewport wake of YouTube pagination) ------------------------
+// --- Nudge (no-viewport wake of YouTube pagination) -----------------------
 world.sentinel = sentinelEl
 check('nudge pulls the sentinel into the viewport without scrolling the page',
   M.nudgeNativeContinuation() === true &&
@@ -216,7 +219,7 @@ check('preloadScreensPending measures buffer below the fold',
   Math.abs(M.preloadScreensPending() - 9) < 0.01,
   'screens=' + M.preloadScreensPending())
 
-// --- Gates ----------------------------------------------------------------
+// --- Gates ---------------------------------------------------------------
 M.resetPreload()
 world.pathname = '/'
 world.scrollHeight = 3000 // buffer 2.33 < target, so a run would nudge
@@ -254,7 +257,9 @@ check('a round nudged the sentinel and counted itself',
   'rounds=' + M.diag.preloadRounds + ' hook=' + M.diag.preloadHook)
 // Simulate YouTube appending content after the nudge.
 world.cards.push(makeEl('ytd-rich-item-renderer'))
-await advance(25)
+// Advance just enough for the next poll to detect growth (poll at ~40ms after nudge)
+// Nudge at ~10ms, polls at ~20,30,40ms. Card added at 30ms. Next poll at 40ms detects growth.
+await advance(20)
 check('a round that grew the feed clears the dead counter',
   M.diag.preloadGrowth >= 1 && M.diag.preloadDeadRounds === 0,
   'growth=' + M.diag.preloadGrowth + ' dead=' + M.diag.preloadDeadRounds)
@@ -301,7 +306,27 @@ M.diag.checked = 11
 M.diag.hidden = 3
 diagWrites.length = 0
 M.flushDiag(true)
-check('flushDiag persists the diagnostic report to storage',
+// Enhanced diagnostics check
+check('flushDiag includes enhanced diagnostic fields',
+  diagWrites.length === 1 &&
+  diagWrites[0].feedDiag &&
+  // Verify new fields are present
+  typeof diagWrites[0].feedDiag.totalScans === 'number' &&
+  typeof diagWrites[0].feedDiag.totalCardsScanned === 'number' &&
+  typeof diagWrites[0].feedDiag.isIntersectionObserverBuild === 'boolean' &&
+  typeof diagWrites[0].feedDiag.continuationSentinelPresent === 'boolean',
+  'missing enhanced fields')
+
+// Additional check for strategy tracking
+check('strategy tracking works',
+  M.diag.nudgeAttempts > 0 || M.diag.scrollAttempts > 0,
+  'no strategy attempts recorded')
+
+check('strategy success tracking works',
+  M.diag.nudgeSuccesses > 0 || M.diag.scrollSuccesses > 0,
+  'no strategy successes recorded')
+
+check('final persistence check',
   diagWrites.length === 1 && diagWrites[0].feedDiag &&
   diagWrites[0].feedDiag.preloadRounds === 4 &&
   diagWrites[0].feedDiag.checked === 11,

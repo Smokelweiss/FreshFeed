@@ -192,6 +192,19 @@ working directory.
 
 FreshFeed stores channel data only in Firefox `storage.local`. Network requests are made only to YouTube, which the user is already visiting.
 
+## Enhanced Diagnostics
+
+FreshFeed includes comprehensive diagnostic tracking that records:
+
+- **Filter performance**: Cards processed, hidden, scan statistics
+- **Preload strategy**: Nudge vs scroll attempts, success rates, build detection
+- **Timing metrics**: Round durations, settle times, buffer calculations
+- **System state**: Browser version, YouTube build type, sentinel presence
+- **User interaction**: Scroll/click events during preload
+- **Error tracking**: Last error, fallback strategies used
+
+All diagnostics are stored in `storage.local` and can be viewed via the extension's popup's "Show Diagnostics" panel. The data is throttled to prevent excessive writes but includes timestamps for temporal analysis.
+
 ## License
 
 AGPL-3.0. The complete license text is in `LICENSE`.

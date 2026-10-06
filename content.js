@@ -964,8 +964,14 @@
       scanHome();
       // Keep the filter observable in Diagnostics without re-adding any of the
       // removed feed-extension machinery.
-      if (diag.page !== location.pathname) diag.page = location.pathname;
-      diag.checked = document.querySelectorAll("[data-ff-checked='1']").length;
+      // Track page navigation for diagnostics
+if (diag.page !== location.pathname) {
+  diag.page = location.pathname;
+  diag.pageChangeCount = (diag.pageChangeCount || 0) + 1;
+}
+      // Count processed cards for filter observability
+diag.checked = document.querySelectorAll("[data-ff-checked='1']").length;
+diag.filteredCardsProcessed = document.querySelectorAll(CARD_SELECTOR).length;
       diag.hidden = document.querySelectorAll("[data-ff-hidden='1']").length;
       diagDirty = true;
       flushDiag();
@@ -991,46 +997,72 @@
   // --- Background feed preload ----------------------------------------------
   // The request: load YouTube's own feed to the end in the background, before
   // the user ever scrolls there, so scrolling down never waits. This does NOT
-  // fabricate cards and does NOT talk to InnerTube: it only wakes YouTube's
-  // own continuation mechanism (the sentinel at the end of the grid) without
-  // moving the user's scroll position.
+  // fabricate cards and does NOT talk to InnerTube: it only wakes the feed
+  // loader YouTube actually ships.
   //
-  // No-viewport nudge: a transform pulls the sentinel up into the viewport,
-  // which fires YouTube's IntersectionObserver and triggers its own fetch and
-  // render; the transform is restored on the next frame. A one-pixel scroll +
-  // restore covers builds that also gate on the real scroll position. The
-  // user's scrollTop/scrollHeight are never changed, so nothing visibly moves
-  // and the feed grows out of sight.
+  // YouTube has two generations of feed loading:
+  //   1. IntersectionObserver grids: the grid watches a continuation element;
+  //      translating that element into the viewport (a CSS transform) fires the
+  //      observer and triggers YouTube's own fetch + render without moving the
+  //      user's scroll position. Invisible.
+  //   2. Scroll-listener grids: the page decides "near the end" from
+  //      scrollY/scrollHeight directly. A transform cannot fake that, so the
+  //      only way to wake the loader is a real scroll. We scroll to the load
+  //      zone and restore inside the scroll event itself, which is a one-frame
+  //      flicker at most and always leaves the user exactly where they were.
+  //
+  // The loop tries the invisible strategy first, verifies that the feed really
+  // grew (a slow server is never mistaken for a dead end), and only then falls
+  // back to the real-scroll strategy. Diagnostics records which strategy
+  // produced growth, so a build that needs the scroll fallback is visible
+  // instead of guessed.
   const PRELOAD = {
     enabled: true,
-    // Tick of the self-sustaining timer; also the minimum gap between nudges,
+    // Tick of the self-sustaining timer; also the minimum gap between rounds,
     // so the loop can never free-run faster than a human could scroll.
     tickMs: 1200,
     // How much feed to keep beyond the fold (in viewport heights). When this
     // much is already buffered, the loop waits instead of loading pages the
     // user cannot reach yet.
     targetScreens: 6,
-    // How long one nudge waits for YouTube to actually append a page.
+    // How long one round waits for YouTube to actually append a page.
     settleMs: 6000,
     settlePollMs: 250,
-    // Pause for a while only after this many consecutive rounds where YouTube
-    // delivered nothing. Reaching it means the feed genuinely ended (or the
-    // build has no native pagination); it pauses and tries again later, and
-    // never shuts the loop off for good.
+    // Rounds that grow nothing before the loop changes strategy or pauses.
+    // Reaching the max pauses quietly for a while and retries later; the loop
+    // never shuts itself off for good.
     maxDeadRounds: 6,
-    pauseAfterDeadMs: 30000
-  };
+    pauseAfterDeadMs: 30000,
+    // Distance from the absolute bottom (px) used by the real-scroll wake-up.
+    // The exact value does not matter: the scroll listener fires on any scroll
+    // and recomputes scrollY for itself.
+    scrollMargin: 200,
+    // How long to wait when the buffer is large (in ms).
+    largeBufferWaitMs: 30000,
+    // How long to wait after a successful growth before trying again (in ms).
+    growthRetryMs: 200
+  };;
 
   // The preload health lives on the diag snapshot (preloadActive/...), so the
   // options page and the tests read the same state the code mutates.
   let preloadTimer = null;
 
+  // Which wake-up actually grew the feed last: "nudge" | "scroll" | "".
+  let lastGrowStrategy = "";
+
   function resetPreload() {
     diag.preloadActive = false;
     diag.preloadRounds = 0;
+    // Strategy attempt/success counters are session-wide, not reset per preload cycle
+    // diag.nudgeAttempts = 0;
+    // diag.nudgeSuccesses = 0;
+    // diag.scrollAttempts = 0;
+    // diag.scrollSuccesses = 0;
     diag.preloadDeadRounds = 0;
     diag.preloadGrowth = 0;
     diag.preloadHook = "";
+    diag.preloadStrategy = "";
+    lastGrowStrategy = "";
     if (preloadTimer) {
       clearTimeout(preloadTimer);
       preloadTimer = null;
@@ -1050,46 +1082,87 @@
     return document.querySelectorAll(CARD_SELECTOR).length;
   }
 
-  // The element YouTube watches to decide to fetch the next page.
-  function findFeedSentinel() {
+  // Everything that can plausibly be the continuation sentinel, from the
+  // narrowest (current build) to the widest net. On scroll-listener builds the
+  // element appears only while a load is in progress, so "none" here is not a
+  // verdict on its own -- the scroll strategy covers that case.
+  function feedSentinelSelector() {
     return (
-      document.querySelector(
-        "ytd-rich-grid-renderer ytd-continuation-item-renderer, " +
-        "ytd-rich-grid-renderer #continuations, " +
-        "ytd-item-section-continuations, " +
-        "ytd-continuation-item-renderer, " +
-        "#continuation-item"
-      ) || null
+      "ytd-rich-grid-renderer ytd-continuation-item-renderer, " +
+      "ytd-rich-grid-renderer #continuations, " +
+      "ytd-item-section-continuations, " +
+      "ytd-continuation-item-renderer, " +
+      "#continuation-item, " +
+      "ytd-renderer[continuation], " +
+      "yt-renderer[continuation], " +
+      "[id*='continuation'], " +
+      "[class*='continuation']"
     );
   }
 
-  // Wake YouTube's own pagination without moving the user. Returns true when a
-  // hook existed and was nudged; false when this build has no sentinel.
-  function nudgeNativeContinuation() {
-    const sentinel = findFeedSentinel();
-    diag.preloadHook = sentinel ? "sentinel" : "none";
-    if (!sentinel) return false;
-    const previous = sentinel.style.transform;
-    try {
-      sentinel.style.transform = "translateY(-100vh)";
-    } catch (error) {
-      return false;
-    }
-    window.requestAnimationFrame(() => {
-      sentinel.style.transform = previous;
-    });
-    // One-pixel scroll + restore for builds that gate on the real scroll
-    // position rather than on the observer alone.
-    const doc = document.scrollingElement || document.documentElement;
-    if (doc && doc.scrollTop > 0) {
-      const before = doc.scrollTop;
-      doc.scrollTop = before - 1;
-      window.requestAnimationFrame(() => {
-        doc.scrollTop = before;
-      });
-    }
-    return true;
+  // The element YouTube watches to decide to fetch the next page.
+  function findFeedSentinel() {
+    return document.querySelector(feedSentinelSelector()) || null;
   }
+
+  // Strategy 1 - invisible wake-up for IntersectionObserver builds: pull the
+  // sentinel into the viewport with a transform and restore it on the next
+  // frame. The user's scroll position and the layout never change.
+function nudgeNativeContinuation() {
+  const sentinel = findFeedSentinel();
+  if (!sentinel) {
+    diag.preloadHook = "none";
+    return false;
+  }
+  diag.preloadHook = "sentinel";
+  const previous = sentinel.style.transform;
+  try {
+    sentinel.style.transform = "translateY(-100vh)";
+  } catch (error) {
+    return false;
+  }
+  window.requestAnimationFrame(() => {
+    sentinel.style.transform = previous;
+  });
+  return true;
+}
+
+  // Strategy 2 - real near-bottom scroll for scroll-listener builds. The
+  // viewport lands on the load zone for a single frame: the restore happens in
+  // the scroll event itself (with an 80 ms safety net so the user is never
+  // left at the bottom), by which time YouTube's own handler has already read
+  // the position and fired its request.
+function scrollWake() {
+  const doc = document.scrollingElement || document.documentElement;
+  if (!doc || doc.scrollHeight <= 0) {
+    diag.preloadHook = "none";
+    return false;
+  }
+  const max = Math.max(0, doc.scrollHeight - window.innerHeight - PRELOAD.scrollMargin);
+  const beforeScroll = doc.scrollTop;
+  if (max === beforeScroll) {
+    diag.preloadHook = "none";
+    return false;
+  }
+  const restore = () => {
+    window.removeEventListener("scroll", restore);
+    if (doc.scrollTop !== beforeScroll) doc.scrollTop = beforeScroll;
+  };
+  window.addEventListener("scroll", restore);
+  window.setTimeout(() => {
+    window.removeEventListener("scroll", restore);
+    if (doc.scrollTop !== beforeScroll) doc.scrollTop = beforeScroll;
+  }, 80);
+  try {
+    doc.scrollTop = max;
+    diag.preloadHook = "scroll";
+  } catch (error) {
+    restore();
+    diag.preloadHook = "none";
+    return false;
+  }
+  return true;
+}
 
   function preloadScreensPending() {
     const doc = document.scrollingElement || document.documentElement;
@@ -1106,18 +1179,25 @@
     }, typeof delayMs === "number" ? delayMs : PRELOAD.tickMs);
   }
 
-  // After a nudge, watch the grid for growth inside the settle window. A slow
+  // After a round, watch the grid for growth inside the settle window. A slow
   // server must not be mistaken for a dead end, so the verdict is never made
   // before the first poll rounds pass.
-  function waitForPreloadGrowth() {
+  function waitForPreloadGrowth(strategy) {
     const before = feedItemCount();
     let checked = 0;
     const poll = () => {
       checked += 1;
-      if (feedItemCount() > before) {
+      const growthStart = feedItemCount();
+if (feedItemCount() > before) {
         diag.preloadGrowth += 1;
         diag.preloadDeadRounds = 0;
-        armPreloadTimer();
+        if (strategy) {
+          lastGrowStrategy = strategy;
+          diag.preloadStrategy = strategy;
+          if (strategy === "nudge") diag.nudgeSuccesses = (diag.nudgeSuccesses || 0) + 1;
+          else if (strategy === "scroll") diag.scrollSuccesses = (diag.scrollSuccesses || 0) + 1;
+        }
+        armPreloadTimer(PRELOAD.growthRetryMs);
         return;
       }
       if (checked * PRELOAD.settlePollMs >= PRELOAD.settleMs) {
@@ -1145,18 +1225,43 @@
     // Enough content already buffered below the fold: wait instead of loading
     // pages the user cannot reach yet.
     if (preloadScreensPending() >= PRELOAD.targetScreens) {
-      armPreloadTimer(PRELOAD.tickMs * 3);
+      armPreloadTimer(PRELOAD.largeBufferWaitMs);
       return;
     }
-    diag.preloadRounds += 1;
-    if (nudgeNativeContinuation()) {
-      waitForPreloadGrowth();
-    } else {
-      // No sentinel on this build: YouTube's native pagination is unavailable,
-      // so there is nothing to wake and poking would just spin. Say so once.
-      diag.preloadDeadRounds = PRELOAD.maxDeadRounds;
-      stopPreload("no continuation sentinel on this build");
+    const roundStart = Date.now();
+diag.preloadRounds += 1;
+diag.lastRoundDuration = Date.now() - roundStart;
+
+    const sentinel = findFeedSentinel();
+    diag.preloadHook = sentinel
+      ? (sentinel.tagName || "element").toLowerCase() + (sentinel.id ? "#" + sentinel.id : "")
+      : "none";
+
+    // Give the invisible strategy a couple of rounds before moving on.
+    if (sentinel && diag.preloadDeadRounds < 2) {
+      diag.nudgeAttempts = (diag.nudgeAttempts || 0) + 1;
+      if (nudgeNativeContinuation()) {
+        waitForPreloadGrowth("nudge");
+        return;
+      }
     }
+
+    // Either this build has no sentinel (scroll-listener grid) or the nudge
+    // has repeatedly delivered nothing. Wake it with a real one-frame scroll --
+    // but never fight the user: only reach for the scroll when they are at or
+    // near the top, so a mid-scroll page is never yanked.
+    const doc = document.scrollingElement || document.documentElement;
+    const userNearTop = !doc || doc.scrollTop < window.innerHeight * 2;
+    if (userNearTop && scrollWake()) {
+      diag.scrollAttempts = (diag.scrollAttempts || 0) + 1;
+      waitForPreloadGrowth("scroll");
+      return;
+    }
+
+    // Nothing to wake at all: no sentinel and no scroll space. Say so once and
+    // pause; the loop still retries later on its own.
+    diag.preloadDeadRounds = PRELOAD.maxDeadRounds;
+    stopPreload("no continuation sentinel and no scroll buffer to wake");
   }
 
   function startPreload() {
@@ -1175,32 +1280,86 @@
     if (!diag.preloadActive) {
       diag.preloadActive = true;
       diag.preloadGate = "";
+      diag.preloadStrategy = "";
       armPreloadTimer();
     }
   }
+
 
   const DIAG_KEY = "feedDiag";
   const DIAG_THROTTLE_MS = 1500;
 
   const diag = {
-    updatedAt: 0,
-    page: "",
-    // How many cards the filter processed and how many it hid, so the filter
-    // stays observable in Diagnostics.
-    checked: 0,
-    hidden: 0,
-    // Background feed preload (native, no fabricated cards).
-    preloadActive: false,
-    preloadSetting: true,
-    preloadHook: "",
-    preloadRounds: 0,
-    preloadGrowth: 0,
-    preloadDeadRounds: 0,
-    preloadGate: "",
-    // Subscription-sync observability (written by the sync code).
-    syncChannels: 0,
-    syncPartial: false,
-    syncSkippedPages: 0
+  // Enhanced diagnostic fields
+  totalScans: 0,
+  totalCardsScanned: 0,
+  totalCardsMarked: 0,
+  totalCardsHidden: 0,
+  bufferScreens: 0,
+  lastError: "",
+  lastErrorTime: 0,
+  fallbackUsed: "",
+  userScrolledDuringPreload: 0,
+  userClickedDuringPreload: 0,
+  browserVersion: navigator.userAgent,
+  youtubeBuild: "",
+  continuationSentinelPresent: false,
+  isIntersectionObserverBuild: false,
+  isScrollListenerBuild: false,
+  feedExhausted: false,
+  storageVersion: 3,
+  // Timestamp and session info
+  updatedAt: 0,
+  sessionStart: Date.now(),
+  page: "",
+  // Filter statistics for observability
+  checked: 0,
+  hidden: 0,
+  filteredCardsProcessed: 0,
+  pendingCardsAtScan: 0,
+  // Background preload detailed state
+  preloadActive: false,
+  preloadRounds: 0,
+  preloadDeadRounds: 0,
+  preloadGrowth: 0,
+  preloadHook: "",
+  preloadStrategy: "",
+  preloadGate: "",
+  lastGrowStrategy: "",
+  preloadTimer: null,
+  // Strategy attempts and results
+  nudgeAttempts: 0,
+  nudgeSuccesses: 0,
+  scrollAttempts: 0,
+  scrollSuccesses: 0,
+  // Performance and timing metrics
+  lastRoundDuration: 0,
+  averageRoundDuration: 0,
+  roundCountForAverage: 0,
+  lastSettleDuration: 0,
+  bufferScreens: 0,
+  // Error and fallback tracking
+  lastError: "",
+  lastErrorTime: 0,
+  fallbackUsed: "",
+  // User interaction data
+  userScrolledDuringPreload: 0,
+  userClickedDuringPreload: 0,
+  // System state
+  browserVersion: navigator.userAgent,
+  youtubeBuild: "",
+  continuationSentinelPresent: false,
+  // Detailed state flags
+  isIntersectionObserverBuild: false,
+  isScrollListenerBuild: false,
+  feedExhausted: false,
+  // Diagnostic counters
+  totalScans: 0,
+  totalCardsScanned: 0,
+  totalCardsMarked: 0,
+  totalCardsHidden: 0,
+  // Storage version for migration tracking
+  storageVersion: 3
   };
   let diagDirty = false;
   let diagLastWrite = 0;
