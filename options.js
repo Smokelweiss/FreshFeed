@@ -337,18 +337,19 @@
     durationOptions.hidden = !settings.filterDuration;
     uploadDateOptions.setAttribute("aria-hidden", String(!settings.filterUploadDate));
     durationOptions.setAttribute("aria-hidden", String(!settings.filterDuration));
-    // Show only the inputs that match the selected mode. "Only past" has no
-    // threshold, "Block older than" shows the "Value" row, "Between" shows the
-    // "From..to" range row.
+    // Show only the inputs that match the selected mode. Both "Only past" and
+    // "Block older than" use a single threshold value ("Value" row); only
+    // "Between" switches to the two-bound "From..to" range row.
     document.getElementById("upload-date-filter-value").hidden = !(
-      settings.filterUploadDate && settings.uploadDateMode === "olderThan"
+      settings.filterUploadDate && settings.uploadDateMode !== "between"
     );
     document.getElementById("upload-date-between").hidden = !(
       settings.filterUploadDate && settings.uploadDateMode === "between"
     );
+    // Duration: "Only shorter than" and "Block longer than" use a single value;
+    // "Between" uses the two-bound range row.
     document.getElementById("duration-filter-value").hidden = !(
-      settings.filterDuration &&
-      (settings.durationMode === "onlyShorter" || settings.durationMode === "longerThan")
+      settings.filterDuration && settings.durationMode !== "between"
     );
     document.getElementById("duration-between").hidden = !(
       settings.filterDuration && settings.durationMode === "between"

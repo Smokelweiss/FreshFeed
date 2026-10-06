@@ -111,11 +111,11 @@
     });
     uploadDateOptions.hidden = !settings.filterUploadDate;
     durationOptions.hidden = !settings.filterDuration;
-    // Show only the inputs that match the selected mode. "Only past" needs no
-    // threshold (there is no numeric row), "Block older than" shows a single
-    // "Value" row, "Between" shows the two-bound "From..to" range row.
+    // Show only the inputs that match the selected mode. Both "Only past" and
+    // "Block older than" use a single threshold value ("Value" row); only
+    // "Between" switches to the two-bound "From..to" range row.
     uploadDateFilterValue.hidden = !(
-      settings.filterUploadDate && settings.uploadDateMode === "olderThan"
+      settings.filterUploadDate && settings.uploadDateMode !== "between"
     );
     uploadDateBetween.hidden = !(
       settings.filterUploadDate && settings.uploadDateMode === "between"
@@ -123,8 +123,7 @@
     // Duration: "Only shorter than" and "Block longer than" use a single value;
     // "Between" uses the two-bound range row.
     durationFilterValue.hidden = !(
-      settings.filterDuration &&
-      (settings.durationMode === "onlyShorter" || settings.durationMode === "longerThan")
+      settings.filterDuration && settings.durationMode !== "between"
     );
     durationBetween.hidden = !(
       settings.filterDuration && settings.durationMode === "between"
@@ -153,12 +152,9 @@
   });
   enabledControl.addEventListener("change", () => browser.storage.local.set({ enabled: enabledControl.checked }).then(refresh));
   allTrash.addEventListener("change", () => {
-    if (!allTrash.checked) return;
-    // Turn every trash setting on. This is a bulk action, not a toggle: the
-    // switch reflects the aggregate state and clearing itself requires turning
-    // one of the individual controls off.
+    // Bulk action, not a toggle: flip every trash setting to match the switch.
     const patch = {};
-    TRASH_KEYS.forEach((key) => { patch[key] = true; });
+    TRASH_KEYS.forEach((key) => { patch[key] = allTrash.checked; });
     browser.storage.local.set(patch).then(refresh);
   });
   settingsButton.addEventListener("click", () => browser.runtime.openOptionsPage());
