@@ -3,3 +3,5 @@ dist/
 *.zip
 *.xpi
 _fix_content.py
+
+.amo-upload-uuid
