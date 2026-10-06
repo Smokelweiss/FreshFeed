@@ -79,6 +79,7 @@
   const blacklistFile = document.getElementById("blacklist-file");
   const blacklistStatus = document.getElementById("blacklist-status");
   const enabledControl = document.getElementById("enabled");
+  const masterLabel = document.getElementById("master-label");
   const filtersSummary = document.getElementById("filters-summary");
   const subscribedList = document.getElementById("subscribed-list");
   const blacklistList = document.getElementById("blacklist-list");
@@ -326,6 +327,10 @@
   function render(data) {
     const settings = settingsOf(data);
     enabledControl.checked = data.enabled !== false;
+    if (masterLabel) {
+      masterLabel.textContent = enabledControl.checked ? "ON" : "OFF";
+      masterLabel.style.color = enabledControl.checked ? "green" : "red";
+    }
     Object.entries(settingControls).forEach(([key, control]) => { control.checked = settings[key] === true; });
     Object.entries(numericControls).forEach(([key, control]) => {
       // Do not re-fill a field the user is actively editing; a refresh racing
@@ -564,7 +569,13 @@
     copyResult.textContent = "Copied";
     setTimeout(() => { copyResult.textContent = "Copy details"; }, 1200);
   });
-  enabledControl.addEventListener("change", () => browser.storage.local.set({ enabled: enabledControl.checked }).then(refresh));
+  enabledControl.addEventListener("change", () => {
+    browser.storage.local.set({ enabled: enabledControl.checked });
+    if (masterLabel) {
+      masterLabel.textContent = enabledControl.checked ? "ON" : "OFF";
+      masterLabel.style.color = enabledControl.checked ? "green" : "red";
+    }
+  });
   browser.storage.onChanged.addListener(refresh);
   selectTabFromHash();
   refresh();
