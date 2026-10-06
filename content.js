@@ -1054,8 +1054,32 @@ diag.pendingCardsAtScan = pendingCards.size;
     // Must span several frames: IntersectionObserver computes intersections
     // during the frame's render step, after rAF callbacks, so a one-frame hold
     // was undone before the observer could see the sentinel in the viewport.
-    nudgeHoldMs: 300
+    nudgeHoldMs: 300,
+    // === BUTTON STRATEGY FOR "NEW FOR YOU" FEED ===
+    // Periodically clicks the "New for you" button to generate fresh content.
+    // Uses invisible transform+opacity nudge to avoid visible page movement.
+    // Falls back to normal nudge if button not found.
+    button: {
+      enabled: true,
+      // How often to press the button (ms)
+      buttonIntervalMs: 5000,
+      // Max button clicks before falling back to nudge-only mode
+      maxButtonClicks: 3,
+      // Delay after button click before next preload attempt (ms)
+      postButtonDelayMs: 2000,
+      // Selectors for the "New for you" button (priority order)
+      newForYouButtonSelectors: [
+        'a[href*="new_for_you"]',
+        'ytd-button-renderer:not([aria-pressed])',
+        'ytd-feed-shared-tab-renderer ytd-button-renderer'
+      ],
+      // Track last click time
+      lastClickTime: 0
+    }
   };
+  // Button strategy state (mutated by the preload loop, read by diagnostics)
+  let buttonClicks = 0;
+  let lastButtonClickTime = 0;
 
   // The preload health lives on the diag snapshot (preloadActive/...), so the
   // options page and the tests read the same state the code mutates.
@@ -1200,11 +1224,88 @@ diag.pendingCardsAtScan = pendingCards.size;
   }
 
   function armPreloadTimer(delayMs) {
-    if (preloadTimer) return;
-    preloadTimer = window.setTimeout(() => {
-      preloadTimer = null;
+  if (preloadTimer) return;
+  preloadTimer = window.setTimeout(() => {
+    preloadTimer = null;
+    if (!diag.preloadExhausted && isFilterSurface()) {
+      // BUTTON STRATEGY: try button click first if enabled and conditions met
+      if (PRELOAD.button && PRELOAD.button.enabled) {
+        if (shouldTriggerButtonClick(PRELOAD.button)) {
+          const clicked = triggerNewForYouButton(PRELOAD.button);
+          if (clicked) {
+            // After button click, wait longer before next attempt
+            setTimeout(() => armPreloadTimer(delayMs), PRELOAD.button.postButtonDelayMs);
+            return;
+          }
+        }
+      }
+      // FALLBACK: standard nudge strategy
       runPreload();
-    }, typeof delayMs === "number" ? delayMs : PRELOAD.tickMs);
+    } // closes if
+  }, typeof delayMs === "number" ? delayMs : PRELOAD.tickMs);
+}
+
+  // Button strategy helpers
+  function shouldTriggerButtonClick(strategy) {
+    const elapsed = Date.now() - (strategy.lastClickTime || 0);
+    const feedItems = feedItemCount();
+    const maxClicks = strategy.maxButtonClicks || 3;
+    
+    // Trigger if few items or enough time passed since last click
+    if (feedItems < 30 && elapsed > strategy.buttonIntervalMs) return true;
+    if (maxClicks > 0 && elapsed > strategy.buttonIntervalMs) return true;
+    return false;
+  }
+
+  function triggerNewForYouButton(strategy) {
+    // Find the "New for you" button using priority-ordered selectors
+    const selectors = strategy.newForYouButtonSelectors;
+    let button = null;
+    for (const selector of selectors) {
+      const candidates = document.querySelectorAll(selector);
+      if (candidates.length > 0) {
+        // Filter: prefer buttons that look like "New for you" (not subscribed, etc.)
+        for (const candidate of candidates) {
+          const text = (candidate.textContent || '').trim();
+          const label = (candidate.getAttribute('aria-label') || '').trim();
+          // Check if this looks like a "New for you" / tab button
+          if (
+            /new.?for.?you/i.test(text) ||
+            /new.?for.?you/i.test(label) ||
+            candidate.tagName === 'YT-BUTTON-RENDERER' ||
+            candidate.tagName === 'A'
+          ) {
+            button = candidate;
+            break;
+          }
+        }
+        if (button) break;
+      }
+    }
+    if (!button) return false;
+
+    // Update strategy state
+    strategy.lastClickTime = Date.now();
+    buttonClicks++;
+
+    // Simulate user click with proper event
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: false,
+      shiftKey: false,
+      metaKey: false,
+      detail: 1
+    });
+    button.dispatchEvent(event);
+
+    // Log to diagnostics
+    if (!diag) diag = {};
+    diag.buttonClicks = (diag.buttonClicks || 0) + 1;
+    diag.lastButtonClickTime = strategy.lastClickTime;
+    diag.buttonStrategyActive = true;
+    diag.newForYouTriggered = true;
+    return true;
   }
 
   // After a round, watch the grid for growth inside the settle window. A slow
@@ -1216,6 +1317,15 @@ diag.pendingCardsAtScan = pendingCards.size;
     const poll = () => {
       checked += 1;
       const growthStart = feedItemCount();
+      // Update button strategy diagnostics
+      if (PRELOAD.button) {
+        diag.buttonStrategy = {
+          enabled: PRELOAD.button.enabled,
+          clicks: diag.buttonClicks || 0,
+          lastClick: PRELOAD.button.lastClickTime || 0,
+          interval: PRELOAD.button.buttonIntervalMs
+        };
+      }
 if (feedItemCount() > before) {
         diag.preloadGrowth += 1;
         diag.preloadDeadRounds = 0;
