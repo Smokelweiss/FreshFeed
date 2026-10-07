@@ -1091,6 +1091,7 @@ diag.pendingCardsAtScan = pendingCards.size;
 
   // The preload health lives on the diag snapshot (preloadActive/...), so the
   // options page and the tests read the same state the code mutates.
+  let preloadArmedAt = null;
   let preloadTimer = null;
 
   // Which wake-up actually grew the feed last: "nudge" | "scroll" | "".
@@ -1253,17 +1254,29 @@ diag.pendingCardsAtScan = pendingCards.size;
   }, typeof delayMs === "number" ? delayMs : PRELOAD.tickMs);
 }
 
-  // Button strategy helpers
+  // Button strategy helpers. Clicking "New for you" REPLACES the whole feed
+  // batch with a fresh one, so it must fire sparingly -- only when the current
+  // batch is nearly exhausted -- otherwise it keeps resetting the feed and the
+  // user never accumulates a long scrollable list (the "endless feed" bug).
   function shouldTriggerButtonClick(strategy) {
-    const elapsed = Date.now() - (strategy.lastClickTime || 0);
-    const feedItems = feedItemCount();
-    const maxClicks = strategy.maxButtonClicks || 3;
     // A hard cap: after maxButtonClicks presses the button strategy hands off
     // to the plain nudge loop instead of hammering the feed replacement.
-    if (buttonClicks >= maxClicks) return false;
-    // Trigger when the feed is nearly empty or enough time passed since last
-    // click. Both are required so the loop never free-runs.
-    return (feedItems < 30 || elapsed > strategy.buttonIntervalMs);
+    if (buttonClicks >= (strategy.maxButtonClicks || 3)) return false;
+    let elapsed;
+    if (typeof preloadArmedAt === "number") {
+      // First press of the session: wait for a warmup so the initial batch can
+      // scroll before we replace it. Later presses use the press cooldown.
+      const anchor = strategy.lastClickTime || preloadArmedAt;
+      elapsed = Date.now() - anchor;
+    } else {
+      elapsed = Date.now() - (strategy.lastClickTime || 0);
+    }
+    // Refresh only when enough time passed since the last press.
+    if (elapsed < (strategy.buttonIntervalMs || 5000)) return false;
+    // Refresh only when the current batch is mostly consumed (small buffer left),
+    // so the nudge loop can keep the fresh batch growing between presses.
+    const screensLeft = preloadScreensPending();
+    return !Number.isFinite(screensLeft) || screensLeft < (PRELOAD.targetScreens / 2);
   }
 
   function triggerNewForYouButton(strategy) {
@@ -1325,6 +1338,11 @@ diag.pendingCardsAtScan = pendingCards.size;
     diag.lastButtonClickTime = strategy.lastClickTime;
     diag.buttonStrategyActive = true;
     diag.newForYouTriggered = true;
+    // The button replaced the whole feed with a fresh batch, so the previous
+    // feed is no longer exhausted: reset the dead/exhausted markers so the
+    // nudge loop can start growing the new batch.
+    diag.preloadExhausted = false;
+    diag.preloadDeadRounds = 0;
     return true;
   }
 
@@ -1439,6 +1457,7 @@ diag.lastRoundDuration = Date.now() - roundStart;
       diag.preloadActive = true;
       diag.preloadGate = "";
       diag.preloadStrategy = "";
+      preloadArmedAt = Date.now();
       armPreloadTimer();
     }
   }
