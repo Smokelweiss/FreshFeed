@@ -294,6 +294,11 @@
     const yes = (v) => (v ? "yes" : "no");
     lines.push("observed: " + when + " on " + (d.page || "?"));
     lines.push("");
+    lines.push("Stored switches (what the extension actually saved)");
+    lines.push("  master ON          : " + yes(data.enabled !== false));
+    lines.push("  background preload : " + yes(data.bgPreload === true));
+    lines.push("  endless feed       : " + yes(data.endlessFeed === true));
+    lines.push("");
     lines.push("Filter");
     lines.push("  cards checked      : " + (d.checked || 0));
     lines.push("  cards hidden       : " + (d.hidden || 0));
