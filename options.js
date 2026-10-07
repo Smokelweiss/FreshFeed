@@ -319,6 +319,15 @@
       ? drift.toFixed(0) + "px of scroll drift measured across all nudge windows"
       : "0px - measured over every nudge window, not assumed"));
     lines.push("");
+    lines.push("Endless feed (button strategy)");
+    lines.push("  enabled            : " + yes(d.buttonStrategy ? d.buttonStrategy.enabled : d.newForYouTriggered));
+    lines.push("  clicks             : " + (d.buttonClicks || 0));
+    lines.push("  max clicks         : " + (d.buttonStrategy ? d.buttonStrategy.maxClicks : "?"));
+    const lastClick = d.lastButtonClickTime || (d.buttonStrategy && d.buttonStrategy.lastClick);
+    lines.push("  last click         : " + (lastClick ? new Date(lastClick).toLocaleTimeString() : "none yet"));
+    lines.push("  interval           : " + (d.buttonStrategy ? d.buttonStrategy.interval : "?") + " ms");
+    lines.push("  button found       : " + yes(d.newForYouTriggered));
+    lines.push("");
     lines.push("Subscription sync");
     lines.push("  channels           : " + (d.syncChannels || 0));
     lines.push("  reported partial   : " + yes(d.syncPartial));

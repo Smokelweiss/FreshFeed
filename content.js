@@ -1069,11 +1069,17 @@ diag.pendingCardsAtScan = pendingCards.size;
       maxButtonClicks: 3,
       // Delay after button click before next preload attempt (ms)
       postButtonDelayMs: 2000,
-      // Selectors for the "New for you" button (priority order)
+      // Selectors for the "New for you" button (priority order). Covers the
+      // modern home-feed chip row, legacy button renderers and fragment links.
       newForYouButtonSelectors: [
         'a[href*="new_for_you"]',
+        'yt-chip-cloud-renderer yt-formatted-string',
+        'ytd-chip-cloud-renderer yt-formatted-string',
+        'ytd-feed-shared-tab-renderer yt-formatted-string',
+        'ytd-feed-shared-tab-renderer ytd-button-renderer',
+        'ytd-feed-filter-chip-bar-renderer ytd-button-renderer',
         'ytd-button-renderer:not([aria-pressed])',
-        'ytd-feed-shared-tab-renderer ytd-button-renderer'
+        'button[aria-label*="New for you"], button[aria-label*="новое для вас"]'
       ],
       // Track last click time
       lastClickTime: 0
@@ -1252,11 +1258,12 @@ diag.pendingCardsAtScan = pendingCards.size;
     const elapsed = Date.now() - (strategy.lastClickTime || 0);
     const feedItems = feedItemCount();
     const maxClicks = strategy.maxButtonClicks || 3;
-    
-    // Trigger if few items or enough time passed since last click
-    if (feedItems < 30 && elapsed > strategy.buttonIntervalMs) return true;
-    if (maxClicks > 0 && elapsed > strategy.buttonIntervalMs) return true;
-    return false;
+    // A hard cap: after maxButtonClicks presses the button strategy hands off
+    // to the plain nudge loop instead of hammering the feed replacement.
+    if (buttonClicks >= maxClicks) return false;
+    // Trigger when the feed is nearly empty or enough time passed since last
+    // click. Both are required so the loop never free-runs.
+    return (feedItems < 30 || elapsed > strategy.buttonIntervalMs);
   }
 
   function triggerNewForYouButton(strategy) {
@@ -1290,6 +1297,17 @@ diag.pendingCardsAtScan = pendingCards.size;
     strategy.lastClickTime = Date.now();
     buttonClicks++;
 
+    // Find the actual clickable element. The text match can land on the inner
+    // yt-formatted-string / label; dispatching on it would not reach YouTube's
+    // click handler, so walk up to the nearest interactive node.
+    let clickTarget = button;
+    if (button && button.closest) {
+      const interactive = button.closest(
+        'button, a, ytd-button-renderer, ytd-feed-filter-chip-bar-renderer, tp-yt-paper-button, yt-button-shape'
+      );
+      if (interactive) clickTarget = interactive;
+    }
+
     // Simulate user click with proper event
     const event = new MouseEvent('click', {
       bubbles: true,
@@ -1299,7 +1317,7 @@ diag.pendingCardsAtScan = pendingCards.size;
       metaKey: false,
       detail: 1
     });
-    button.dispatchEvent(event);
+    clickTarget.dispatchEvent(event);
 
     // Log to diagnostics
     if (!diag) diag = {};
@@ -1325,7 +1343,8 @@ diag.pendingCardsAtScan = pendingCards.size;
           enabled: PRELOAD.button.enabled,
           clicks: diag.buttonClicks || 0,
           lastClick: PRELOAD.button.lastClickTime || 0,
-          interval: PRELOAD.button.buttonIntervalMs
+          interval: PRELOAD.button.buttonIntervalMs,
+          maxClicks: PRELOAD.button.maxButtonClicks
         };
       }
 if (feedItemCount() > before) {

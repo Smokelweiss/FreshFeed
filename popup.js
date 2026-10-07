@@ -72,6 +72,7 @@
   const error = document.getElementById("error");
   const settingsButton = document.getElementById("settings");
   const enabledControl = document.getElementById("enabled");
+  const masterLabel = document.getElementById("master-label");
   const allTrash = document.getElementById("block-all-trash");
   // Settings that "Block All Trash" switches on at once. These are the three
   // categories above it (Channels, Content types, Promoted & generated blocks).
@@ -95,6 +96,11 @@
     const data = await browser.storage.local.get([...Object.keys(settingControls), "enabled", "lastSyncResult"]);
     const settings = { ...defaults, ...data };
     enabledControl.checked = data.enabled !== false;
+    if (masterLabel) {
+      masterLabel.textContent = enabledControl.checked ? "ON" : "OFF";
+      masterLabel.style.color = enabledControl.checked ? "green" : "red";
+      masterLabel.style.fontWeight = "bold";
+    }
     Object.entries(settingControls).forEach(([key, control]) => {
       control.checked = settings[key] === true;
     });
@@ -169,3 +175,4 @@
   browser.storage.onChanged.addListener(refresh);
   refresh();
 }());
+
